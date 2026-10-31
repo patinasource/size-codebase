@@ -1,0 +1,784 @@
+# How size_codebase.py works
+
+`size_codebase.py` takes an inventory of a codebase. It counts lines of code by language, separates the owner's own code from code someone else wrote, reads the version-control history, counts contributors and pull requests, lists assets, flags credentials and licences, and produces the standard measures that codebase questionnaires ask for (logical lines and generated lines as `scc` counts them, duplication as `jscpd` measures it, commits on the main branch).
+
+It is a single Python file that needs Python 3.8 or later and nothing else. It runs on Windows, macOS and Linux.
+
+This document explains what it does in detail: what it reads, how it decides what is code and whose code it is, how it reads each version-control system, and where it can be wrong. The README has the short version and basic usage.
+
+Contents:
+
+1. [Privacy: what it reads, what it reports, what it never does](#1-privacy-what-it-reads-what-it-reports-what-it-never-does)
+2. [What you can point it at](#2-what-you-can-point-it-at)
+3. [Walking the folder: project types and what is skipped](#3-walking-the-folder-project-types-and-what-is-skipped)
+4. [What counts as code](#4-what-counts-as-code)
+5. [Game engines](#5-game-engines)
+6. [Codebases inside a file or a database](#6-codebases-inside-a-file-or-a-database)
+7. [Own code versus someone else's](#7-own-code-versus-someone-elses)
+8. [Generated code, data, duplicates and other things that are not counted as own code](#8-generated-code-data-duplicates-and-other-things-that-are-not-counted-as-own-code)
+9. [Version control](#9-version-control)
+10. [Contributors](#10-contributors)
+11. [Other findings](#11-other-findings)
+12. [Standard measures (scc, jscpd)](#12-standard-measures-scc-jscpd)
+13. [Output](#13-output)
+14. [Command-line reference](#14-command-line-reference)
+15. [Limitations, and how to correct them](#15-limitations-and-how-to-correct-them)
+
+---
+
+## 1. Privacy: what it reads, what it reports, what it never does
+
+### What the report contains
+
+The report is made of counts, and the names of folders, languages, libraries and file kinds. It does not contain:
+
+- **Source code.** No line of code is copied into the report. (Exception: with `--reports`, jscpd's own report is saved beside it, and that report holds copies of the duplicated code. See [section 12](#12-standard-measures-scc-jscpd).)
+- **File names**, apart from the exceptions listed below.
+- **Author names or email addresses.** Names are read from version control and from code comments to *count* people. They stay in memory and are never written to the report or the JSON file.
+- **Credentials.** Only the kind of credential found and the number of files is reported (for example "AWS access keys (2 files)"), never the text.
+- **Database rows.** See below.
+
+Things that *can* appear in the report, so you know what to look over before sending it:
+
+- Folder paths relative to the scanned folder (in the per-folder breakdown, the list of project types, folders with their own licence file, repositories found inside the folder).
+- Names of libraries and packages: copied-in library folders, Unity Asset Store package names, packages listed in `package.json`, `requirements.txt`, `.csproj` and similar files, library names taken from build files, folder names of `#include`d headers that are not in the folder, and Git submodule names.
+- File extensions (in the list of text files of unknown kinds).
+- Git remote names (such as `origin`), branch names, and an SVN path relative to the repository root.
+- If the repository can be read by anyone on github.com, gitlab.com or bitbucket.org, its address (`github.com/owner/repo`).
+- When you give it a single file (an Access database, say), that file's name, as the project name.
+- When you mark a single file as third-party with `--third-party`, that file's name, in the list of libraries.
+- A "Problems while scanning" section, if something unexpected went wrong. It shows up to five error messages, and an operating-system error message can include a file path.
+
+### Databases: code only, never rows
+
+From Access databases, SQL Server and SQL Server packages, it reads only code (queries, VBA, stored procedures, views, functions, triggers, SSIS statements and scripts, SSRS queries and code) and the list of objects. It never reads a table's rows. The one table-like thing it reads is Access's own catalog of objects (`MSysObjects`), through mdbtools, to count forms, reports, queries, macros and modules. For a `.bacpac` export, which holds every table's rows, only the schema (`model.xml`) and the pre- and post-deployment scripts are opened.
+
+### Network access
+
+Nothing from the codebase is uploaded. The script makes these network requests, and no others:
+
+1. **Your own version-control servers**, read-only, with the access you already have. For each Git remote (except Epic's public Unreal Engine repository) it runs `git ls-remote` to list pull-request refs. SVN, Perforce, Plastic, TFVC and CVS history commands contact their servers as those tools normally do. All of these run non-interactively: if a server wants a password that isn't already stored, the request fails and the report says "couldn't connect" rather than prompting.
+2. **GitHub's API through `gh`**, only if GitHub's command-line tool is installed and logged in, to count merged pull requests for GitHub remotes. The query includes the repository's owner and name.
+3. **A public-access check.** For remotes on github.com, gitlab.com or bitbucket.org it runs `git ls-remote` over HTTPS with credential helpers switched off. This only succeeds if the repository is public, which the report then points out.
+4. **SQL Server**, only if you name one with `--sql-server`.
+5. **Downloads of scc and jscpd**, once, from GitHub releases and registry.npmjs.org, checked against fixed SHA-256 checksums. `--no-download` turns this off.
+
+### What it runs and what it writes
+
+It only reads the project's files. It writes:
+
+- The report files (see [section 13](#13-output)).
+- The cached copies of scc and jscpd, in a cache folder (see [section 12](#12-standard-measures-scc-jscpd)).
+- Temporary folders, deleted straight after use: a copy of an Access database being opened, the small PowerShell script that opens it, and jscpd's configuration and output.
+
+The external programs it may run are: the version-control command-line tools (only commands that read history: `git log`, `git ls-files`, `svn log`, `p4 changes`, `hg log` and so on), `gh`, PowerShell with Microsoft Access (Windows only), mdbtools, `sqlcmd`, and the pinned scc and jscpd. Git is run with `safe.directory=*` so that it will read repositories on drives owned by another user account (external drives, copied folders); this does not change any configuration.
+
+Microsoft Access is only ever given a temporary *copy* of a database, opened with Access's macros and code switched off (`AutomationSecurity` set to "force disable"), so nothing in the file runs and the original is never touched. mdbtools only reads, so it works on the original.
+
+---
+
+## 2. What you can point it at
+
+- **A folder.** The usual case. Everything under it is scanned.
+- **Several folders.** Each is scanned and reported separately, with the same options.
+- **A single file.** Typically an Access database, which holds a whole program in one file. Only that file is examined (its folder supplies the version-control context). scc and jscpd are not run on a single file.
+- **Nothing.** Started without arguments (for example by double-clicking it on Windows), it asks for a folder: drag it into the window or paste the path, press Enter, and repeat for more folders. An empty line ends it. Options can't be given in this mode.
+
+Dragged and pasted paths are cleaned up: Windows-style `"quotes"`, macOS Terminal's backslash escapes (`My\ Game`), Linux `'quotes'` and `file://` URLs all work.
+
+On Windows it handles paths longer than 260 characters and network shares. Folder names are matched case-insensitively where it matters (Linux tells `Classes` from `classes`; Windows, where most projects are made, does not).
+
+---
+
+## 3. Walking the folder: project types and what is skipped
+
+### Project types
+
+In every folder it looks for the marks of a project and lists what it finds under "Project types found". A type is not listed again inside a project of the same type (so `docs/requirements.txt` inside a Python project is not a second project).
+
+| Type | Recognised by |
+|---|---|
+| Unity | `ProjectSettings/ProjectVersion.txt` (gives the editor version), or `Assets` and `ProjectSettings` side by side |
+| Unreal Engine 4/5 project | a `.uproject` (its `EngineAssociation` gives the engine version, or says it is a custom-built engine) |
+| Unreal Editor for Fortnite | a `.uefnproject` |
+| Unreal Engine source | `Build/Build.version` (the `Engine` folder of a source build; gives major.minor.patch) |
+| Unreal Engine 3 | `Development/Src` |
+| Unreal Engine 1/2 | a `System` folder holding `.u` or `.int` files, beside `Maps`, `Textures`, `Sounds` or `Music` |
+| UnrealScript package | a `Classes` folder holding `.uc` files |
+| Godot | `project.godot` (version from `config/features`, else 3.x or 4.x from `config_version`) |
+| GameMaker | `.yyp` (Studio 2) or `.project.gmx` (Studio 1) |
+| Ren'Py | a `game` folder holding `.rpy`, `.rpyc` or `.rpa` files |
+| Defold | `game.project` |
+| Construct | `.c3proj`, `.capx`, `.c3p`, `.caproj` (its event sheets are not counted) |
+| RPG Maker MV / MZ | `.rpgproject` / `.rmmzproject`, or `js/rpg_core.js` / `js/rmmz_core.js` beside `data` |
+| LÖVE | `main.lua` and `conf.lua` |
+| Source engine (Valve) | `gameinfo.txt`, or `game`, `public` and `tier1` folders |
+| CRYENGINE, Stride, Flax, MonoGame, XNA | `.cryproject`; `.sdpkg`/`.sdsln`; `.flaxproj`; `.mgcb`; `.contentproj` |
+| Haxe (OpenFL / HaxeFlixel / Kha) | `.hxml`, or a `project.xml` that mentions haxelib |
+| Ogre3D | `plugins.cfg`, `resources.cfg` or `ogre.cfg` |
+| JavaScript (+ TypeScript) | `package.json` (TypeScript if `tsconfig.json` is beside it) |
+| Python | `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt` or `Pipfile` |
+| .NET | `.csproj`, `.fsproj` or `.vbproj` (not inside Unity) |
+| Visual Studio solution | `.sln` (with its number of projects) |
+| C/C++ (Visual Studio, CMake, premake), Meson, SCons, Xcode | `.vcxproj`/`.vcproj`, `CMakeLists.txt`, `premake*.lua`, `meson.build`, `SConstruct`, `*.xcodeproj` |
+| Java/Kotlin (Gradle), Java (Maven), Rust, Go | `build.gradle(.kts)`/`settings.gradle(.kts)`, `pom.xml`, `Cargo.toml`, `go.mod` |
+| Visual Basic 6 | `.vbp` or `.vbg` |
+| Microsoft Access | Access database files in the folder (with their number) |
+| Access exported as text | a folder named like `X.accdb.src` (the msaccess-vcs add-in's layout) |
+| SQL Server: SSDT, SSIS, SSRS | `.sqlproj`, `.dtproj`, `.rptproj` |
+
+The type matters because it changes how the folder is read: which folders are build output, what an ambiguous extension means, and which folders are someone else's.
+
+### Skipped everywhere
+
+These folders are never entered, wherever they appear: version-control folders (`.git`, `.svn`, `.hg`, `.bzr`, `.plastic`), editor settings (`.vs`, `.idea`, `.vscode`, `.history`), package caches and dependencies (`node_modules`, `bower_components`, `jspm_packages`, `.yarn`, `.pnpm-store`, `site-packages`, `Pods`, `Carthage`, `.swiftpm`, `.build`, `.dart_tool`, `.pub-cache`), framework build caches (`.next`, `.nuxt`, `.output`, `.svelte-kit`, `.turbo`, `.parcel-cache`, `.vercel`, `.cache`, `.sass-cache`, `.gradle`), Python caches and environments (`__pycache__`, `.venv`, `venv`, `.tox`, `.nox`, `.eggs`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `.ipynb_checkpoints`), and operating-system clutter (`__MACOSX`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`).
+
+Also skipped: any `*.egg-info` folder; any folder holding `pyvenv.cfg` (a Python virtual environment, whatever it is called); `cmake-build-*` folders and any folder holding `CMakeCache.txt` (CMake build folders); a `packages` folder whose subfolders hold `.nupkg` files (NuGet's downloads); symbolic links and Windows junctions (they can loop or lead to code counted twice; the report says how many were skipped); and macOS `._*` metadata files.
+
+### Skipped only at the root of a project of a given kind
+
+Build output is skipped only directly inside the project's root folder, so that a folder like `Assets/Scripts/Library` is still counted.
+
+| Project | Folders skipped at its root |
+|---|---|
+| Unity | `Library`, `Temp`, `Obj`, `Logs`, `UserSettings`, `Build`, `Builds`, `MemoryCaptures` |
+| Unreal | `Intermediate`, `Saved`, `DerivedDataCache`, `Binaries`, `Build`, and packaged builds made into the project folder (`Windows`, `WindowsNoEditor`, `WindowsClient`, `WindowsServer`, `Linux`, `LinuxNoEditor`, `LinuxServer`, `Mac`, `MacNoEditor`, `Android`, `IOS`, `StagedBuilds`, `ArchivedBuilds`) |
+| Unreal Engine source | `Intermediate`, `Saved`, `DerivedDataCache`, `Binaries` |
+| Unreal Engine 3 | `Intermediate`, `Binaries` |
+| Any folder with a `.uplugin` | `Intermediate`, `Binaries` |
+| JavaScript | `dist`, `build`, `out`, `coverage`, `storybook-static` |
+| Python | `build`, `dist`, `htmlcov` |
+| .NET, SSDT, SSIS, SSRS | `bin`, `obj` |
+| C/C++ (Visual Studio) | `Debug`, `Release`, `x64`, `Win32`, `x86`, `ARM64`, `ipch` |
+| Gradle | `build`, `.gradle`, `.cxx` |
+| Maven, Rust | `target` |
+| Godot | `.godot`, `.import` |
+| GameMaker | `options`, `tmp` |
+
+The "Total size" line in the report counts the files that remain, so it excludes dependencies, caches and build output.
+
+---
+
+## 4. What counts as code
+
+### Languages by extension
+
+A file is code if its extension is a known language. The list covers, among others:
+
+- Mainstream: C, C++ (including modules and CUDA), C#, Objective-C, Java, Kotlin, Swift, Go, Rust, Python, Cython, JavaScript, TypeScript, Vue, Svelte, HTML, CSS/SCSS/Sass/Less, Ruby, PHP, Lua, Dart, Scala, Groovy, Elixir, Erlang, Haskell, OCaml, Clojure, F#, Zig, Nim, Perl, Tcl, CoffeeScript, shell, PowerShell, batch files.
+- Shaders: HLSL, GLSL, Cg, Unity `.shader`/`.cginc`/`.compute`, Unreal `.usf`/`.ush`, Metal, WGSL, Slang, Godot shaders, and the usual stage extensions (`.vert`, `.frag` ...).
+- Game and narrative scripting: UnrealScript, Verse, SkookumScript, GDScript, Ren'Py, GML, Haxe, ActionScript, Squirrel, Luau, MoonScript, Monkey, BlitzBasic, BlitzMax, AppGameKit, Boo, Ink, Yarn Spinner, Twine, Naninovel.
+- Microsoft and database: Visual Basic (`.vb`), VB6/VBA (`.bas`, `.cls`, `.frm`, `.ctl`, `.dsr`, `.pag`, `.dob`), VBScript, SQL and T-SQL, PL/SQL.
+- Enterprise and legacy: COBOL, Fortran (fixed and free form), Ada, ABAP, JCL, PL/I, RPG, VHDL, Verilog/SystemVerilog, Pascal/Delphi, assembly.
+- Build scripts: CMake, Gradle, and build files recognised by name (`premake*.lua`, `CMakeLists.txt`, `Makefile`, `*.mk`, `SConstruct`, `SConscript`, `meson.build`, `build.ninja`, `Jamfile`, `*.jam`, `wscript`). These are listed under their own labels, such as "Lua (build scripts)" and "Make (build scripts)", so they can be told apart from the product's code.
+
+Some extensions mean code only in a certain kind of project:
+
+- `.script`, `.gui_script`, `.render_script` are Lua only inside a Defold project.
+- `.fs` is F# only inside a .NET project (elsewhere it is usually a fragment shader).
+- `.js` inside a Unity project's `Assets` is labelled UnityScript.
+- `.as` inside an Unreal project is labelled AngelScript (elsewhere, ActionScript).
+- `*.Build.cs` and `*.Target.cs` are labelled "C# (build rules)" (Unreal's build scripts).
+- VB6/VBA files are labelled "Visual Basic 6" in a VB6 project and "VBA (Access)" in an Access project.
+
+Not counted as code: documentation and configuration text (`.txt`, `.md`, `.json`, `.xml`, `.yaml`, `.toml`, `.ini`, `.csv`, project files such as `.sln` and `.csproj`, Unity `.meta` and `.asset`, and so on), and Jupyter notebooks, which are listed with the assets.
+
+### How lines are counted
+
+The main table counts **non-blank lines**, comments included. Files saved as UTF-16 (common for Windows C++, C# and UnrealScript, and for scripts saved by SQL Server Management Studio) are converted first, so their blank lines count as blank.
+
+The standard measures (section 12) count **logical lines** as scc does: lines that are neither blank nor only a comment. For this the script knows each language's comment syntax, and recognises strings so that a `//` or `#` inside a string is not taken for a comment. It handles C-style comments, C++ raw strings, C# verbatim and raw strings, Python docstrings and triple-quoted strings, Lua long comments, PowerShell block comments, SQL and VB quoting, Haskell and OCaml block comments, Pascal's three comment styles, and column-based comments in COBOL (column 7), fixed-form Fortran (column 1), ABAP and JCL. Languages whose comment syntax it doesn't know have every non-blank line counted.
+
+Some file types have lines removed before counting:
+
+- **VB6 forms and controls** (`.frm`, `.ctl`, `.dsr`, `.pag`, `.dob`, `.cls`): the layout section before the first `Attribute VB_` line, and the `Attribute VB_` lines themselves, are not code. A `.cls` or `.bas` file that doesn't look like Visual Basic (for example a LaTeX class file) is not counted.
+- **SQL scripts**: `INSERT` statements (with their continuation lines, `SET IDENTITY_INSERT` around them, and `GO` separators between them) are the data in a database, not its code. They are moved to the "Data, not code" section.
+- **Access objects exported as text**: see [section 6](#6-codebases-inside-a-file-or-a-database).
+
+### Languages it doesn't know: `--code-ext`
+
+Files in a language the script doesn't know (a company's own language, say) are not counted as code. Instead, text files of unknown kinds among the owner's own code are listed, by extension, with their number and size, when there are at least five of them. (An extension is judged to be text by its first file: no NUL bytes in its first 4 KB.)
+
+If some of them are code, run again with `--code-ext`:
+
+```
+--code-ext .par=PARLANSE
+--code-ext ".atg=DMS grammar:Ada"
+```
+
+The part after `=` is the language's name in the report. The optional part after `:` is a known language whose comment syntax it shares, used to count logical lines: `text` (the default: every non-blank line counts), `C`, `Ada`, `SQL`, `Lisp`, `Python` or `Pascal`. The option can be repeated. The same languages are passed on to scc (as `--count-as-pattern`) and jscpd (as `--formats-exts`), so the standard measures include them too. A specification it can't read stops the script with an explanation.
+
+---
+
+## 5. Game engines
+
+The script is a general codebase inventory, but it understands game engines in depth, because a game's code is often spread across engine files, bought packages and visual scripts.
+
+### Unity
+
+- The editor version is read from `ProjectSettings/ProjectVersion.txt`.
+- Build output folders at the project root are skipped (see section 3).
+- Someone else's code inside `Assets` is separated out by several means (all described in [section 7](#7-own-code-versus-someone-elses)): `Plugins` folders, Unity's own add-ons (TextMesh Pro, Standard Assets, Samples, AssetStoreTools), the folder names of about 150 widely used Asset Store packages, folders laid out like an Asset Store package, and, most reliably, the guids of the Asset Store packages downloaded on the computer running the script.
+- In `Packages/`, Unity's own `com.unity.*` packages are third-party; other embedded packages are the owner's. `Packages/manifest.json` is read for the list of package dependencies.
+- `.js` files in `Assets` are labelled UnityScript.
+- If the folder holds a *built* Unity game rather than the project (`UnityPlayer.dll`, `globalgamemanagers`, `GameAssembly.dll`, `Assembly-CSharp.dll` and their macOS/Linux equivalents, with no Unity project), the report says so, and says whether it is a Mono build (from which C# can be recovered) or an IL2CPP build (compiled to machine code).
+
+### Unreal Engine 4 and 5
+
+- The engine version comes from the `.uproject`. A custom-built engine is recognised (see "Custom-built and forked engines" below). UEFN projects are recognised and their Verse code counted.
+- C++ is counted as code; `*.Build.cs`/`*.Target.cs` as build rules.
+- **Blueprints and other visual scripting are counted in nodes.** The script reads the header tables of each `.uasset` and `.umap` (never the asset data itself) and counts the nodes in its graphs. Rows in the report: Blueprints, Widget Blueprints (UI), Animation Blueprints, Level Blueprints, Materials, Behavior trees (AI), and other node graphs (Niagara, sound cues, MetaSounds, Control Rig, PCG and similar). Comments, reroute knots and the editor's duplicate material graph nodes are not counted, just as blank lines aren't counted in code. Data-only Blueprints (that set values without logic) are counted as files with no nodes.
+- The package reader handles every UE4 and UE5 file-summary layout from the earliest UE4 to UE 5.6, little- and big-endian (console builds), and the alternative tag used by some licensee games. The sizes of the import and export table entries vary with the version and in modified engines; the script works them out from where the tables start and end, and if that doesn't add up, tries each plausible size and keeps one only if every entry in the table makes sense. Packages larger than 256 MB have only their header read.
+- **Cooked** assets (from a packaged game) have had their graphs stripped. They are counted as assets but contribute no nodes, and the report says how many there were.
+- The report says how much could be measured: how many packages were read in full, how many were cooked, how many couldn't be read (and how many of those appear to hold Blueprint graphs, judged by tell-tale class names in their first 64 KB), how many are Git LFS placeholders that were never downloaded, and how many Blueprints have no nodes.
+- Assets are classified by the class of the package's main object: levels, textures, 3D models, materials, animations, audio, visual effects, data tables, AI, cinematics, fonts, Blueprints. World Partition's per-actor files are grouped as "Level actors (World Partition)". The engine versions that saved the assets are listed.
+- Plugins bought from the Marketplace or Fab, or Epic's own (their `.uplugin` has a `MarketplaceURL` or `FabURL`, says `Installed`, or was created by Epic), are third-party. Other plugins are the owner's. Epic's sample content directly under `Content/` (StarterContent, AnimStarterPack, Mannequin, LevelPrototyping, Megascans, Marketplace, Fab) is third-party.
+- Files with Epic's copyright notice stay the owner's code (Unreal's templates put the notice on a project's first files, and developers keep it on files they start by copying those) but are counted and pointed out, so you can check none were copied from the engine.
+- `#include`s of Unreal's own headers are expected and not reported as missing code.
+- If the folder holds a packaged Unreal game (`.pak`/`.utoc` files without a project), the report says so.
+
+### Unreal Engine 3
+
+- Recognised by `Development/Src`. Epic's own UnrealScript and C++ packages (Core, Engine, Editor, UnrealEd, GameFramework, UTGame, UDKBase, the online subsystems and many more) are reported as "Unreal Engine's own code", separately from the licensee's packages beside them.
+- Kismet and material nodes are counted from UE3 packages saved by package version 491 or later. Because the export table layout varies between UE3 versions and licensees, the count is only trusted if the table ends exactly where the next one starts. Compressed packages are treated as cooked.
+- The per-folder breakdown shows `Development/Src/<package>` for UE3 trees.
+
+### Unreal Engine 1 and 2
+
+- Recognised by a `System` folder with `.u`/`.int` files beside the content folders, or by `Classes/*.uc` package folders.
+- `.u` files are compiled UnrealScript packages, and they usually carry each class's source text. The script counts the classes and the source lines inside them. If the `.uc` source files are also present, the report says the `.u` holds the same classes; if not, it says the `.u` is the only copy of the source (which is then not added to the code count).
+- Epic's packages (Core, Engine, Botpack, UnrealShare, XGame and so on) are counted as the engine's.
+- Level, texture, sound, music, mesh and animation packages (`.unr`, `.ut2`, `.utx`, `.uax`, `.umx`, `.usx`, `.ukx` ...) are identified and counted as assets.
+
+### Custom-built and forked engines
+
+- A project whose `EngineAssociation` is not a version number is built with a custom engine. The script looks the engine up where Unreal registers source builds (the Windows registry, or `Install.ini` on macOS and Linux), or, if the association is empty, in up to five folders above the project. If found outside the scanned folder (or in a different repository), the engine gets its own section with its version and version-control history. If not found, the report says to run the script on the engine's folder too.
+- A source copy of the engine inside the scanned folder is reported as "Unreal Engine's own code (Epic's, possibly with the studio's changes)", separately from the game's code.
+- For an engine fork in Git, see "Unreal Engine forks" in [section 9](#9-version-control).
+
+### Godot
+
+Version from `project.godot`. GDScript and Godot shaders are counted. `addons/` at the project root is third-party, each addon named by its folder. `.godot` and `.import` are skipped. `.tres` resources and `.tscn` scenes are counted as assets. C++ `#include`s in a Godot project are attributed to godot-cpp rather than reported as missing.
+
+### GameMaker
+
+Studio 1 and 2 projects are recognised, GML is counted, and `options` and `tmp` at the root are skipped.
+
+### Ren'Py
+
+- `.rpy` and `.rpym` are counted as Ren'Py code.
+- `game/tl/` holds the game's text translated into other languages, often most of a Ren'Py game's lines. It is reported as "Translations", not code. (A `tl` folder outside a Ren'Py game is ordinary code.)
+- A released game ships the engine (`renpy/`) and a copy of Python (`lib/`) beside `game/`; both are third-party. `python-packages` folders (where Ren'Py games bundle pip libraries) are third-party.
+- If there are compiled scripts (`.rpyc`) or archives (`.rpa`) but no `.rpy` source, the report says the source is missing or packed into archives.
+
+### Others
+
+- **Defold**: `.script`, `.gui_script` and `.render_script` are counted as Lua.
+- **RPG Maker MV/MZ**: the engine's own `rpg_*.js`/`rmmz_*.js` files and the libraries it ships (PIXI, Effekseer, lz-string, localforage ...) are third-party; plugins are the owner's.
+- **Construct**: recognised, but its event sheets (its logic) are not counted, and the project type says so.
+- **LÖVE, Source engine, CRYENGINE, Stride, Flax, MonoGame, XNA, Haxe, Ogre3D**: recognised and listed; their code is counted by language. Files carrying Valve's, Crytek's, Unity Technologies' or Amazon's (Lumberyard/O3DE) copyright notice are pointed out, as with Epic's.
+
+### Console code
+
+Code in console-platform folders (`PS4`, `PS5`, `Orbis`, `Prospero`, `XboxOne`, `XboxSeries`, `Scarlett`, `GDK`, `NX`, `WiiU`, `3DS` and similar; `Switch`, `Xbox`, `PlayStation`, `Nintendo` and `Sony` only when they sit beside other platform folders) or in files whose names mark a console (`_ps5.`, `.xsx.`, `-nx64.` ...) is counted as the owner's but pointed out: it is usually under the platform holder's NDA, which may keep it out of a sale or licence.
+
+---
+
+## 6. Codebases inside a file or a database
+
+Much of a business system's code can live inside database files rather than source files. The script reads these and adds their code to the language table, under labels that say where it came from (for example "SQL (in Access queries)" or "T-SQL (in the SQL Server database)"). A "Databases" section summarises what was found.
+
+### Microsoft Access (`.accdb`, `.mdb`, `.accda`, `.accde`, `.mde`, `.mda`, `.adp`, `.ade`)
+
+The format is identified from the file's first bytes: Access 97 or earlier (Jet 3), Access 2000-2003 (Jet 4), Access 2007 or later (ACE), or an Access Data Project (a front end for SQL Server). A database is **compiled** if its extension says so (`.mde`, `.accde`, `.ade`), or if its properties say MDE (which catches an `.accde` renamed to `.accdb`). A compiled database has had its VBA source removed, and the report says so.
+
+How much can be read depends on the computer:
+
+- **Windows with Microsoft Access installed**: everything. The script copies the database to a temporary folder and drives Access through PowerShell, with macros and code disabled. It reads the number of forms, reports, macros and modules, every query's SQL, the tables (and how many are linked over ODBC, for example to SQL Server, meaning the data lives there), and the source of every VBA module, including the code behind forms and reports. The copy is deleted afterwards.
+- **Elsewhere, or without Access, with mdbtools installed**: everything except VBA. Query SQL comes from `mdb-queries`; the numbers of forms, reports, macros, modules and tables come from Access's object catalog. mdbtools gives each query's SQL on one line, so it is counted as Access shows it: one line per clause (`FROM`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `UNION` ...).
+- **Neither**: the database is listed and counted as a data file, and the report says to run the script on Windows with Access installed.
+
+Queries whose names begin with `~` are the record sources of forms and reports, and are labelled "SQL (in Access forms and reports)". VBA from the database is also searched for authors named in comments (see [section 10](#10-contributors)).
+
+Databases inside third-party folders are listed but not opened.
+
+Because an Access database holds its tables in the same file as its code, each one is also listed under "Files holding data" (see [section 8](#8-generated-code-data-duplicates-and-other-things-that-are-not-counted-as-own-code)).
+
+### Access objects exported as text
+
+Many teams keep Access code in version control by exporting each object as text (with `SaveAsText` or the msaccess-vcs add-in). The script recognises these exports by their first lines, whatever their extension (`.bas`, `.txt`, `.form`, `.report`, `.macro`, `.qry`, `.mac`, `.frm`, `.rpt`):
+
+- **Forms and reports**: only the VBA after `CodeBehindForm`/`CodeBehindReport` is counted, without `Attribute VB_` lines. The layout (which holds hex blobs such as printer settings) is not code and is not mistaken for embedded data.
+- **Queries**: the SQL is decoded from `dbMemo "SQL"` and counted. A query saved in Access's design grid instead is counted one line per table, column, join and condition, and the report says so. If the add-in saved the SQL in a `.sql` file beside the query, only the `.sql` file is counted.
+- **Macros**: counted as objects, not lines.
+
+If the folder holds both a database and its text export, the code is counted once: when the exported forms and reports number at least half of the database's, the database's own code is left out, and the report says it was counted from the export.
+
+### SQL scripts (`.sql`, `.tsql`)
+
+- Each object a script creates or alters (procedures, functions, views, triggers, tables, types, synonyms, sequences, schemas) is counted once by its schema-qualified name (schema `dbo` when none is given), however many scripts alter it. Temporary tables and table variables are ignored.
+- `INSERT` statements are data, not code (see section 4). A script with them is also listed under "Files holding data".
+- UTF-16 and UTF-8-with-BOM scripts (as SQL Server Management Studio saves them) are read correctly.
+
+### `.dacpac` and `.bacpac` packages
+
+These are zip files describing a SQL Server database. The script reads `model.xml` to count objects by kind, and counts the bodies of procedures, functions, views and triggers as "T-SQL (in .dacpac / .bacpac packages)", **unless the same object is already defined in a `.sql` script** in the folder, so that a database project and its built package are not counted twice. Pre- and post-deployment scripts are counted as SQL, with their `INSERT`s as data. A `.bacpac` also holds every table's rows; only its schema is read, and it is listed as a data file.
+
+### SQL Server databases (`--sql-server`)
+
+Code that exists only inside a running SQL Server is read with `--sql-server SERVER` (repeatable). The script uses `sqlcmd` (found on `PATH` or in its usual install folders on Windows and Linux) and signs in with Windows authentication, unless `SQLCMDUSER` and `SQLCMDPASSWORD` are set in the environment, in which case `sqlcmd` uses those. It first tries trusting the server's certificate (newer `sqlcmd` versions insist on encryption), then without.
+
+It reads every user database that is online, or only those named with `--sql-database`. From each it reads the definitions of user-created modules (stored procedures, functions, views, triggers, rules) from `sys.sql_modules`, and the number of user tables. Nothing else is queried. Each definition is counted as "T-SQL (in the SQL Server database)", unless the same object (by schema and name) was already counted from a `.sql` script.
+
+### SQL Server data files and backups
+
+`.mdf`, `.ndf`, `.ldf`, `.bak` and `.trn` files are counted, but the code inside them can't be read from the files. The report says so, suggests `--sql-server` or exporting the code, and lists them as data files.
+
+### SSIS and SSRS
+
+- **SSIS packages** (`.dtsx`, or a whole project in an `.ispac`): SQL statements from Execute SQL tasks and data-flow commands are counted as "SQL (in SSIS packages)", and the code of script tasks (their `ScriptMain` C# or VB.NET, not designer files) as "C# (in SSIS script tasks)" or "VB.NET (in SSIS script tasks)".
+- **SSRS reports** (`.rdl`, `.rdlc`): dataset queries (`CommandText`) are counted as "SQL (in SSRS reports)", and custom code blocks as "VB.NET (in SSRS reports)".
+
+### Code embedded in binary assets
+
+The same idea applies to Unreal: visual-scripting graphs inside `.uasset`/`.umap` packages are counted in nodes, and UnrealScript source carried inside UE1/UE2 `.u` packages is counted in lines (section 5).
+
+---
+
+## 7. Own code versus someone else's
+
+The main code table is headed "Apparently original source code". This is code that *looks* like the owner's own. It is not a finding on legal ownership or licensing rights, and the report says so.
+
+Every folder inherits a category from its parent: own, test, third-party, or engine (Epic's). Files can then be placed in a different category. The mechanisms below are applied in roughly this order; a hand mark (`--own` or `--third-party`) overrides all of them.
+
+### By folder name
+
+Child folders of the owner's code are third-party if they are named:
+
+- `vendor`, `vendors`, `_vendor`, `vendored`, `third_party`, `thirdparty`, `third-party`, `external`, `externals`, `extern`, `python-packages`, or `fonts` (font vendors' demo pages and CSS). The libraries inside are named by their subfolders (so `ThirdParty/boost` is listed as "boost").
+- The name of a library often copied straight into source folders: about 130 names, such as `boost`, `sqlite`, `zlib`, `libpng`, `eigen`, `glm`, `rapidjson`, `nlohmann`, `fmt`, `spdlog`, `imgui`, `freetype`, `bullet`, `physx`, `openssl`, `curl`, `protobuf`, `googletest`, `catch2`, `stb`, `tinyxml2`, `pugixml`, `asio`, `box2d`, `luajit`, `sol2`, `enet`, `libuv`, `recastnavigation`, `abseil`, `tbb`, `openal-soft`, `bgfx`, `mimalloc`, `tracy`, `harfbuzz`, `icu`, `libsodium`, `mbedtls`, `grpc`, `poco`, `unlua`, `discord_game_sdk`.
+- In a Unity project's `Assets`: `Plugins` anywhere; `TextMesh Pro`, `Samples`, `Standard Assets*`, `Sample Assets`, `AssetStoreTools` directly in `Assets`; and the folder names of widely used Asset Store packages anywhere under `Assets` (DOTween, Odin/Sirenix, PlayMaker, Rewired, Photon, UniRx, Final IK, Amplify, Gaia, Easy Save, Behavior Designer, Dialogue System, Feel/MoreMountains, Animancer, A* Pathfinding, NGUI, LeanTween, Zenject, FMOD, Wwise, Spine, Steamworks.NET, ad and analytics SDKs, and about a hundred more).
+- In a Unity project's `Packages`: `com.unity.*`.
+- In a Godot project: `addons` at the root.
+- In a Ren'Py game: `renpy` and `lib` at the root.
+- In an Unreal project's `Content`: Epic's sample content and asset packs (listed in section 5).
+
+Folders named `test`, `tests`, `__tests__`, `spec`, `specs`, `e2e`, `EditMode` or `PlayMode`, and files named like tests (`test_*.py`, `*_test.py`, `conftest.py`, `*.test.js`, `*.spec.ts` ...), are the owner's code but counted as tests, shown in the table's "of which tests" line.
+
+### Unity Asset Store packages
+
+Asset Store packages unpack into folders with any name under `Assets`, so folder names are not enough. Three further checks:
+
+1. **Packages downloaded on this computer.** When a Unity project is found, the script reads the `.unitypackage` files in Unity's Asset Store download folder (`%APPDATA%\Unity\Asset Store*` on Windows, `~/Library/Unity/Asset Store*` on macOS, `~/.local/share/unity3d/Asset Store*` on Linux, plus `ASSETSTORE_CACHE_PATH` if set). It reads only the names of the entries in each package, which are the guids of its assets. Unity keeps an asset's guid in its `.meta` file when importing it, so a folder or file in the project whose `.meta` guid matches is recognised as that package's, **even if it was moved or renamed**. Packages are read smallest first (code packages before large art packs), for at most 300 seconds in total. The report says how many of the downloaded packages were read. Unreadable packages are skipped.
+2. **Package layout.** A folder under `Assets` with both documentation (`Documentation`, `Docs`, `Manual`, `Help`) and demo (`Demo`, `Demos`, `Example`, `Examples`, `Demo Scenes` ...) subfolders, or with a readme, manual, changelog or licence file that mentions the Asset Store (`assetstore.unity.com`, `u3d.as/`, "Asset Store"), is treated as a package.
+3. **Known folder names**, above.
+
+### Unreal plugins and engine code
+
+See section 5: bought and Epic plugins by their `.uplugin`, Epic's sample content by folder, Epic's UE1-3 packages by name (only when they hold `Classes`, `Inc` or `Src`), a source copy of the engine by `Build/Build.version`, and Epic's `.u` packages by name.
+
+### Licence files in folders
+
+A folder (other than the scanned folder itself) holding its own `LICENSE`, `LICENCE`, `COPYING` or `COPYRIGHT` file is judged by where it sits:
+
+- If it is not itself a project root and its parent folder holds code files, it is a library copied in among the owner's code, and is third-party.
+- Otherwise (for example `Plugins/X` or `Mods/X`, a package among other packages), it may well be the owner's own open-sourced code. It stays the owner's, but is listed under "Folders with their own licence file, counted as original code" with its line count, so you can check it.
+
+### Licence headers in files
+
+The first 6 KB of every code file is checked for a licence notice: the Boost licence, SQLite's public-domain dedication, MIT ("Permission is hereby granted, free of charge"), Apache, GPL/LGPL/AGPL, BSD ("Redistribution and use in source and binary forms"), zlib, MPL, Unlicense/CC0, or the matching `SPDX-License-Identifier`. A file with one, among the owner's code, is moved to third-party and listed under that licence.
+
+Engine makers' notices (Epic's, Valve's, Crytek's, Unity Technologies', Amazon's) are different: they are **not** taken as a sign of someone else's code, because files started from an engine's templates keep them. Those files stay the owner's, but the number of lines carrying each notice is shown so you can check.
+
+### Known library files
+
+Single files from well-known libraries are recognised by name wherever they are: the SQLite amalgamation (`sqlite3*.c/h`), `stb_*.h`, Dear ImGui's files, `json.hpp`, miniz/lz4/xxhash/zstd, TinyXML/pugixml, common single-header libraries (`httplib.h`, `cgltf.h`, `miniaudio.h`, `dr_*.h`, `picojson.h`, `rapidxml*.hpp`, `cxxopts.hpp`, `doctest.h`), FastNoise, moodycamel's queues, and RPG Maker's engine and library files.
+
+### Git submodules
+
+Submodules listed in a `.gitmodules` file are third-party if their URL's owner (the account or organisation on the hosting service) differs from the owner of the repository containing them. Submodules from the same owner stay the owner's. The report lists how many submodules there are and which were counted as someone else's.
+
+### Package managers and manifests
+
+Dependencies installed by package managers (`node_modules`, `site-packages`, virtual environments, `Pods`, NuGet's `packages`, and so on) are skipped entirely. Their manifests are read to list what the project depends on (see [section 11](#11-other-findings)).
+
+### The per-folder breakdown
+
+The report shows the owner's code by folder (top 15), so a library that slipped through is easy to spot. It starts from the top-level folders, showing two levels for common source roots (`Assets/`, `src/`, `Source/`, `packages/`, `apps/`, `lib/`, `libs/`, `game/`, `Plugins/`, `Content/`, `script/`, `scripts/`). If one folder holds more than half of all the code, it is opened up into its subfolders, so that, for example, a `boost` folder copied into `Source/MyGame` shows up on its own line.
+
+### Correcting it by hand: `--own` and `--third-party`
+
+If a folder or file is in the wrong category, name it:
+
+```
+--third-party Source/Game/SomeLib --own Plugins/MyPlugin
+```
+
+Paths are relative to the scanned folder, or absolute. Both options can be repeated and apply to folders or single files. A hand mark overrides every rule above, including for folders inside a third-party folder (so you can mark one plugin inside `Plugins` as your own). The report notes how many paths were marked. A folder marked third-party is listed under its folder name; a file under its file name.
+
+---
+
+## 8. Generated code, data, duplicates and other things that are not counted as own code
+
+### Generated and minified code
+
+A file is generated, and reported separately from the owner's code, if:
+
+- its name says so: `*.min.js`, `*.min.css`, `*.bundle.js`, `*.Designer.cs`, `*.g.cs`, `*.generated.*`, `*_pb2.py`, `*_pb2_grpc.py`, `*.pb.cc`, `*.pb.h`, `*_generated.h`, Qt's `moc_*.cpp`, `ui_*.h` and `qrc_*.cpp`, SWIG's `*_wrap.c`/`*_wrap.cxx`, `lex.yy.c`, Bison's `*.tab.c`/`*.tab.h`;
+- its first 1,500 bytes contain "auto-generated", "autogenerated", "@generated" or "do not edit"; or
+- it is a JavaScript or CSS file over 20 KB whose lines average more than 300 bytes (minified).
+
+### Data embedded in code
+
+Images, fonts, sounds and lookup tables are often pasted into source files as arrays of numbers. A file of at least 40 non-blank lines is treated as data if at least 80% of a sample of its lines are nothing but comma-separated numbers, hex values, character literals or byte strings. Such files go to "Data, not code". (Each value is checked separately, so a single enormous line of digits can't stall the scan.)
+
+### Files holding data
+
+What is being inventoried is the code, and data files may hold customers' data. The report lists, with their sizes, files that should stay out of whatever is shared:
+
+- Access databases (their tables are in the same file as the code);
+- SQL Server database files and backups;
+- `.bacpac` exports;
+- SQL scripts with `INSERT` statements;
+- data files of at least 100 KB outside third-party folders: `.csv`, `.tsv`, `.xls`, `.xlsx`, `.xlsm`, `.ods`, `.parquet`, `.avro`, `.orc`, `.feather`, `.jsonl`, `.ndjson`, `.sqlite`, `.sqlite3`, `.db`, `.db3`, `.sdf`, `.dbf`, `.fdb`, `.gdb`, `.dmp`, `.dump`, `.bcp` (not `Thumbs.db`).
+
+It then explains how to share the code without the data: SQL Server Management Studio's "Generate Scripts" with "Schema only", or a `.dacpac`; for Access, exporting objects as text, emptying the tables, or sharing only the front end of a split database; for data files, leaving them out or substituting sample data.
+
+### Exact duplicates
+
+Among the owner's code, a file whose contents are byte-for-byte identical to another file already counted (compared by SHA-1) is a duplicate: a backup, or the same code kept in two places. The report gives the lines in duplicate files and the total without them. (Near-duplicates and copy-pasted fragments are measured separately, by the duplication ratio in section 12.)
+
+### Precompiled libraries
+
+`.dll`, `.lib`, `.a`, `.so`, `.dylib`, `.jar`, `.aar`, `.bpl`, `.ocx` and `.pyd` files are counted, split between the owner's folders and third-party folders. They have no source in the folder, so they can't be licensed as source.
+
+### Build output
+
+Build output is skipped by the folder rules in section 3. In addition, if the folder is a Git repository, files Git is told to ignore are left out of the standard measures (as scc leaves them out), though they are still counted in the main table.
+
+### Files not committed
+
+In a Git repository, the owner's code files that Git doesn't track are counted and pointed out: they exist only in this copy.
+
+---
+
+## 9. Version control
+
+### Which systems, and how each is read
+
+The script looks for each system's marker in the scanned folder or any of the six folders above it, so a subfolder of a working copy is recognised. It then reads the history with that system's own command-line tool. On Windows it also looks for the tools where GitHub Desktop, SourceTree, TortoiseSVN, TortoiseHg, P4V, Plastic/Unity Version Control, Visual Studio, Breezy, Fossil and CVSNT install them, since those are often not on `PATH`.
+
+| System | Marker | How the history is read | Unit |
+|---|---|---|---|
+| Git | `git rev-parse` succeeds, or `.git` | `git log --all` (every branch), names and emails through the repository's `.mailmap` | commits |
+| Perforce | `p4` reports submitted changes for the folder; or `.p4config`, `.p4ignore`, `p4config.txt` (or the file `P4CONFIG` names) | `p4 changes -l -s submitted <folder>/...` | submitted changelists |
+| SVN | `.svn` | `svn log --xml -r HEAD:1` (up to the newest revision on the server, not just the checkout's), falling back to the checkout's own history | revisions |
+| Mercurial | `.hg` | `hg log` | commits (merges from the second parent) |
+| Plastic SCM / Unity Version Control | `.plastic` | `cm find changeset`; code reviews from `cm find review` | changesets |
+| Team Foundation (TFVC) | `$tf`, `.$tf`, `.tfignore` | `tf history . /recursive` | changesets |
+| Bazaar | `.bzr` | `brz log`, or `bzr log` | revisions |
+| Fossil | `.fslckout`, `_FOSSIL_` | `fossil timeline` (check-ins only, without the initial empty check-in) | check-ins |
+| Darcs | `_darcs` | `darcs log --xml-output` | patches |
+| CVS | `CVS/Root` | `cvs log`: file revisions grouped into commits by commit id, or, from before CVS had them, by the same author, minute and message | commits |
+| Visual SourceSafe | its database (see below) | read directly from the database files | check-ins |
+| Unity Collaborate, SourceGear Vault | `.collabignore`, `_sgvault` | not readable here; the report asks for an export | |
+
+If a system is found but its tool isn't installed, or reads no history, the report says so (for example "Bazaar (but the brz command isn't installed, so no history)", or "Perforce (no history: is p4 installed and logged in?)"). Perforce is detected by asking `p4` itself, because its settings often live in the registry or environment rather than in a file.
+
+All commands run without prompting for passwords (`GIT_TERMINAL_PROMPT=0`, Git Credential Manager non-interactive, SSH in batch mode), with UTF-8 output, and with time limits. `p4` is run with `PWD` set to the folder, because it finds its `P4CONFIG` settings from `PWD`.
+
+Dates: TFVC and Plastic print dates in the computer's local format, so only the year is used from them.
+
+### What each history reports
+
+For each history: the number of changes; for Git, how many are on the branch that is checked out, and how many are merge commits; the number of contributors (see section 10); first and last change; the busiest person's share of the changes; changes per year; pull requests and code reviews found; and notes.
+
+For Git, it also notes:
+
+- a **shallow clone** (older history is missing; run `git fetch --unshallow`);
+- commits **dated before Git existed** (7 April 2005), which must have been converted from an earlier system;
+- history **imported from other systems**, one marker per original change: Perforce changelists imported with git-p4, SVN revisions imported with git-svn, TFS changesets imported with git-tfs.
+
+When a subfolder of a Git repository is scanned, only the commits that touched that subfolder are counted (with `--full-history`, so merge commits that brought changes into it are kept).
+
+### Pull requests and code reviews
+
+Pull requests are found three ways, and each is reported separately:
+
+1. **In commit messages.** "Merge pull request #N" (GitHub, Bitbucket Server), "Merged in branch (pull request #N)" (Bitbucket Cloud), "See merge request group/project!N" (GitLab), "Merged PR N:" (Azure DevOps), and GitHub squash merges ending in "(#N)". Each numbering scheme is kept separate, and each number is counted once however many commits mention it. Code reviews are found the same way: Gerrit `Change-Id`s, Phabricator `Differential Revision`s, and Perforce Swarm `#review-N`. These are read from the change messages of every system the script reads messages from: all of them except TFVC (whose history is read without messages) and SourceSafe.
+2. **On the Git server.** GitHub, GitLab and Bitbucket Server keep a ref for every pull request ever opened (`refs/pull/N/...`, `refs/merge-requests/N/...`, `refs/pull-requests/N/...`). `git ls-remote` on each remote counts them: open, closed and merged. A remote that can't be reached is reported as "couldn't connect", not as zero pull requests.
+3. **Through GitHub's API**, if `gh` is installed and logged in: the number of merged pull requests for each GitHub remote.
+
+Plastic code reviews are counted with `cm find review`.
+
+If none are found in a Git repository, the report says "none found in commit messages or on the server (which doesn't mean there were none)". The summary uses the largest pull-request count found.
+
+### Unreal Engine forks
+
+Studios that modify Unreal Engine often keep a fork of Epic's repository, which carries hundreds of thousands of Epic's commits. The script tells them apart:
+
+- Commits whose message ends like `[CL 16428889 by ... in ue5-main branch]` (as every commit in Epic's repository does), or whose author email is at `epicgames.com` or `epicgames.net`, are Epic's. They are counted on a separate line and left out of everything else: commit counts, contributors, pull requests and the standard measures.
+- **How much the studio changed Epic's code**: the studio's branch is the local branch with the most non-Epic commits (checking `HEAD` and up to 30 branches), even if Epic's release branch happens to be checked out. The report shows the newest Epic changelist on that branch, and the files changed and lines added and removed between it and the branch.
+- **An engine repository that starts from a copy of Epic's source** rather than Epic's history: the script adds up the files changed and lines added and removed in the studio's non-merge commits, leaving out bulk imports (commits touching at least 3,000 files or adding at least 300,000 lines, which bring in new versions of Epic's code). The report says how many bulk imports were left out.
+- Pull requests on Epic's own GitHub repository are never counted.
+
+### Visual SourceSafe
+
+Microsoft stopped selling SourceSafe in 2005 and its command line (`ss.exe`) is rarely installed, so the script reads the database files directly, using the same record layout that vss2git, vss2svn and py-vss read.
+
+**Finding the database.** A SourceSafe database is a folder with `srcsafe.ini` and a `data` folder. The script finds it:
+
+- inside the scanned folder (the database's own files are then not counted as code);
+- through the `SSDIR` environment variable;
+- where the project files say it is: `SccAuxPath` entries in `.sln`, `.vcproj`, `.vcxproj`, `.csproj`, `.vbproj` and `.scc` files. These locations are shown on screen only, never saved in the report (a server's name isn't for the report), and read if they can be reached;
+- with `--sourcesafe <folder>`.
+
+SourceSafe has no server program, so a copy of the database from a backup or an old disk works as well as the original, as does a copy without `srcsafe.ini`, or the `data` folder on its own. The `Data_Path` setting in `srcsafe.ini` is honoured. Up to five databases are read.
+
+**Reading it.** Every revision of every file is a record. Records with a wrong check value (a CRC-32 folded to 16 bits) are left out and counted as damaged in a note. Labels are counted separately. Actions that are not a change of their own (labels, "added" in a project, which duplicates "created" in the file's own record, and archive/restore) are left out.
+
+**Check-ins.** SourceSafe has no commits, so revisions are grouped into check-ins the way vss2git groups them: by the same person, either within 30 seconds of each other, or with the same comment within 10 minutes. The report shows check-ins, the file revisions in them, contributors, dates, labels, and the number of files and projects in the database.
+
+**When the database isn't there.** If the code was evidently kept in SourceSafe (folders still hold `vssver.scc`/`vssver2.scc` binding files, project files name a database, or Git commit messages mention SourceSafe or vss2git) but no database was found, the report explains how to add it with `--sourcesafe`, and mentions any Git commits dated before 2005 that suggest part of it was already converted. SourceSafe archive files (`.ssa`) are pointed out; the script can't read them, and the report explains how to restore one with SourceSafe Administrator.
+
+### Projects that moved between systems
+
+**SourceSafe and Git.** When both histories are present, the script works out how they relate and gives a combined figure without counting the same work twice:
+
+- **Converted**: Git's history starts within 31 days of SourceSafe's, and Git has commits on at least half of the days with SourceSafe check-ins. The history was converted into Git, so Git's numbers are the whole history and SourceSafe's are not added.
+- **One after the other**: SourceSafe's last check-in is on or before Git's first commit. The two are added together.
+- **Overlapping**: both were in use for a while. The same work may be in both, so that period is counted once, from Git: SourceSafe check-ins outside the overlap are added to all of Git's commits.
+
+The summary gives the combined number of changes and date range, and says which case applied.
+
+**A Git history that starts with a bulk import.** If one of Git's root commits (dated after Git existed) adds at least 300 files, the report notes that the code was copied in from somewhere else and its earlier history isn't in Git.
+
+**Other systems side by side.** Each system found is reported with its own history: for example Git and Perforce for the same folder. Imported-history markers (git-p4, git-svn, git-tfs) and pre-2005 dates show when one history was converted from another. Contributors are counted across all histories together, each person once (section 10).
+
+### Repositories inside the scanned folder, and engines outside it
+
+- Repositories found inside the scanned folder (say, `Game/` and `Tools/` side by side, or a submodule) get their own history sections, up to ten. Systems that put a marker folder in every folder (old SVN, CVS) are counted once, at their top folder. A repository is not reported twice if it is the same Git repository as the scanned folder.
+- A custom-built Unreal Engine found elsewhere on the computer gets its own section (section 5).
+
+### Caveats printed with every history
+
+The report reminds the reader that the numbers count what this copy of the history holds: commits on all branches include unmerged work; squash merges turn many commits into one; deleted branches, and history from before an import or migration, are missing; and pull requests are found only where the hosting service leaves traces in the repository, so the count from the hosting service itself is the authoritative one.
+
+### When there is no version control
+
+The report says so, and shows the range of years in which the source files were last modified (noting that copying can reset file dates). If all the owner's files were modified within one day, it says that's when the files were copied or unzipped, not when the code was written. If the folder looks like a downloaded archive rather than a repository (its name ends in `-main`, `-master`, `-develop`, `-trunk`, `-release`, `-default` or a commit hash, or all its files were modified within an hour), it suggests running the script on a clone instead.
+
+---
+
+## 10. Contributors
+
+### Merging identities
+
+People commit under several names and addresses. The script groups identities that belong to one person (with a union-find over every author seen):
+
+- An author's identities are their name and email (or just a user name, for systems like Perforce and SVN). Comparisons ignore case.
+- Two authors are the same person if they share an **email address**, a **full name** (one with a space in it), or a **distinctive handle** (at least five characters and not a common first name).
+- GitHub's privacy addresses (`12345+jane@users.noreply.github.com`) are reduced to the user name (`jane`), which ties them to the same person's other identities.
+- A lone first name ("alex") never ties identities together, nor do shared defaults: `root`, `admin`, `administrator`, `user`, `build`, `buildbot`, `jenkins`, `teamcity`, `ci`, `github`, `gitlab`, `dev`, `developer`, `default`, `unknown`, `none`, `anonymous`, `system`, `unity`, `unreal`, `(no author)` and the like.
+- Chains are followed: if A shares an email with B and B shares a name with C, all three are one person.
+- Git's `.mailmap` is applied before any of this.
+
+The same grouping is applied **across all histories** (several repositories, nested repositories, SourceSafe and Git): the summary gives the number of people across all of them, each counted once.
+
+### Authors named in code comments
+
+Without version control, the only trace of who wrote the code is often a comment. The script finds authors named in the comments of the owner's code (and in VBA read from Access databases):
+
+- `@author Jane Doe`, `Author: Jane Doe <jane@example.com>`, `Authors: Jane Doe and Kenji Mori`, `Written by`, `Created by` (including Xcode's `Created by Jane Doe on 3/4/15.`), `Coded by`, `Programmed by`, `Programmer:`, and Python's `__author__ = "..."`.
+- Only in comment lines (`//`, `/*`, `*`, `#`, `'`, `--`, `;`, `REM`, `<!--`, `{`, `(*`), so a string in code that contains "Author:" isn't counted.
+- Several names on one line are split on commas, "&", "/" and "and". Text after an email, a date, a year or a word like "on", "at", "for", "in" is dropped.
+- Not counted as people: things that aren't names (prose such as "the factory", tools such as "Unity" or "Visual Studio", months, "various contributors", "see AUTHORS"), placeholders ("John Doe", "Your Name", "Firstname Lastname"), and template variables such as `$Author$` or `${USER}`.
+
+These people are grouped with the same rules as above and **only counted, never named**. The count always appears in the report; without version control it is also given in the summary as the number of contributors, with the warning that there were probably more.
+
+---
+
+## 11. Other findings
+
+### Assets
+
+Files are counted by kind across the whole folder (including third-party packages): scenes and levels, prefabs, 3D models, textures and images, audio, animations, materials, visual effects, UI layouts, fonts, video, Godot resources, documents (design documents and specifications: PDF, Word, Excel, PowerPoint, OpenDocument, Pages, Keynote, Numbers), Jupyter notebooks, Ren'Py compiled scripts and archives, Unreal packages by type (section 5), and Access databases.
+
+If there are at least 1,000 lines of the owner's code but fewer than 20 content assets (not counting scenes and notebooks) and no visual scripting, the report notes that this looks like the source code only, and suggests asking whether the full project still exists.
+
+### Credentials
+
+The script looks for credentials that would have to be removed before code changes hands. It reports only their kind and the number of files:
+
+- **Key and credential files, by name**, in any folder: `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `.env` and `.env.*`, and `.pem`, `.p12`, `.pfx`, `.keystore`, `.jks`, `.ppk`, `.mobileprovision` files.
+- **Secrets in file contents**: private keys (`-----BEGIN ... PRIVATE KEY`), AWS access keys, Google API keys, GitHub tokens, Slack tokens, Stripe live secret keys, and passwords in connection strings (`password=...;` or `pwd=...;`). Searched in every code file, and in configuration-type files under 1 MB (`.env`, `.ini`, `.cfg`, `.conf`, `.config`, `.json`, `.yml`, `.yaml`, `.xml`, `.properties`, `.plist`, `.toml`, `.txt`, `.asset`) outside third-party folders.
+
+### Licences
+
+- **At the top of the folder**: a `LICENSE`, `LICENCE`, `COPYING`, `COPYRIGHT` or `EULA` file is classified as a non-commercial licence, AGPL, LGPL, GPL, MPL, Apache 2.0, MIT, BSD, zlib, Creative Commons, Unlicense/public domain, proprietary (all rights reserved), or "a licence of its own". Anything other than proprietary or its own raises a "licensed to others already" alert.
+- **In folders and file headers**: see section 7.
+- **Copyright years**: the range of years in copyright notices in the owner's code (1980-2049, including ranges like "2012-2016" and the © sign).
+- **Public repository**: if a GitHub, GitLab or Bitbucket remote can be read without logging in, the report says the code is already public.
+
+### Code the project needs that isn't in the folder
+
+A project built on a company's own engine or shared library kept elsewhere (or lost) shows up here. The script collects:
+
+- **`#include` and `#import`s** in the owner's C-family code that don't resolve to any file in the scanned folder. Compiler and operating-system headers (the C and C++ standard libraries, POSIX, Windows, DirectX, Apple frameworks, OpenGL) are ignored. In an Unreal, Godot, Source or CRYENGINE project, the engine's own headers are expected and attributed to the engine. The rest are grouped by known library (Boost, Ogre, Bullet, PhysX, SDL, Qt, FMOD, Wwise, Steamworks, Havok, Scaleform, Bink and about 70 others) or by their first folder.
+- **Build files**: include and library folders outside the project named in premake (`includedirs`, `libdirs`), CMake (`include_directories`, `target_include_directories`, `link_directories`, `find_package`, `FetchContent_Declare`, `ExternalProject_Add`), Visual Studio project and property files (`AdditionalIncludeDirectories`, `AdditionalLibraryDirectories`, `IncludePath`, `LibraryPath`), Xcode (`HEADER_SEARCH_PATHS`, `LIBRARY_SEARCH_PATHS`, `FRAMEWORK_SEARCH_PATHS`), Meson (`dependency()`), and Makefiles and SCons (`-I`, `-L`, `pkg-config`). Each path is reduced to a library name: path noise (`include`, `lib`, `x64`, `Program Files` ...) and personal folders (and the user name after `Users/` or `home/`) are skipped, versions are read from names like `boost_1_55_0` ("boost 1.55.0"), and a path that is only a variable is named by the variable (`$(DXSDK_DIR)` gives "DXSDK"). Paths inside the project are ignored.
+
+Names the script recognises as well-known libraries are listed as "Known libraries". Names it doesn't recognise are listed first, as possibly the owner's own code (an engine, shared code) to ask for, and raise an alert.
+
+- **Package lists**: dependencies named in `package.json` (including dev dependencies), Unity's `Packages/manifest.json`, Marketplace/Fab plugins enabled in a `.uproject`, `vcpkg.json`, `requirements*.txt`, `pyproject.toml`, `Cargo.toml`, `.csproj`/`.fsproj`/`.vbproj` package references, `packages.config`, `conanfile.txt`, `go.mod`, `build.gradle(.kts)` and `pom.xml`, grouped by ecosystem (up to 12 names each, then a count).
+
+### The summary's "Check" line
+
+The summary at the top ends with a list of things a reader should check, when present: exact copies of files, console code, text files of unknown kinds, a compiled Access database, Access databases not opened, SQL Server files whose code isn't counted, data files to keep out, code needed from elsewhere, credentials, no assets, a downloaded copy without history, an open licence, a public repository, and SourceSafe history not included or archives not read.
+
+---
+
+## 12. Standard measures (scc, jscpd)
+
+Codebase questionnaires commonly ask for the same handful of figures, defined by the tools they name. The report ends with them, measured over the owner's apparently original code:
+
+| Measure | Definition |
+|---|---|
+| Logical lines of code | scc's count: lines that are not blank and not only a comment |
+| of which generated | scc with `--gen` and `--generated-markers "do not edit,<auto-generated />,<auto-generated>"`, excluding `vendor`, `node_modules`, `dist`, `build`, `generated`, `migrations` |
+| Duplication ratio | jscpd with `--min-tokens 50 --min-lines 5`, ignoring `**/*.csv` |
+| Commits on the main branch, without merges or reverts | as `git log --oneline --no-merges` on the main branch, minus subjects containing "revert" |
+| Repositories | the number of histories found (at least 1) |
+| Primary language | the language with the most logical lines, named as forms name languages |
+| History | "Git, full history", "Git, but a shallow clone", another system (with the suggestion to convert it to Git or deliver a snapshot), or "flat snapshot" |
+| Changes made before 2022 | changes dated before AI coding assistants were common, out of all changes |
+
+### Running scc and jscpd
+
+The script uses pinned versions: **scc 4.1.0** (from its GitHub releases) and **jscpd 5.4.1** (from registry.npmjs.org, where it is published as a self-contained program, so Node.js isn't needed). Builds are pinned for macOS (Apple silicon and Intel), Linux (ARM64 and x64; scc also 32-bit x86; jscpd for glibc and musl) and Windows (ARM64 and x64; scc also 32-bit x86).
+
+- Each is downloaded once and checked against a fixed SHA-256 checksum before use. A download that doesn't match is never run. Only the one program file is taken out of the archive.
+- They are kept in a cache folder: `%LOCALAPPDATA%\size_codebase_tools` on Windows, `~/Library/Caches/size_codebase_tools` on macOS, and `$XDG_CACHE_HOME/size_codebase_tools` (or `~/.cache/size_codebase_tools`) on Linux, in subfolders named by tool and version. Deleting the folder removes them.
+- If Python can't verify HTTPS certificates (python.org's macOS installer has none until its "Install Certificates" step is run), the download is retried without certificate verification; the pinned checksum is what vouches for the file.
+- If the download fails (offline, a proxy, a full disk), or with `--no-download`, the script uses a copy already in the cache, or an `scc`/`jscpd` already installed on `PATH` (whatever its version).
+- If neither tool can be used, the script **estimates** the figures itself and says why the tools weren't used.
+
+Both tools are run over the whole folder. Then only the owner's code is kept: the folders where the owner's code gives way to someone else's, to the engine, or to build output, and someone else's files among the owner's, are left out (from scc's per-file results, and through a jscpd ignore list). Paths marked `--own` inside such folders are kept. The report gives the number of folders and files left out (never their names) and scc's figure for the whole folder for comparison. The tools are not run when a single file is given.
+
+### The estimates
+
+Without the tools, the script computes the same figures from what it has read:
+
+- **Logical lines**: from the per-language comment syntax described in section 4. Files Git ignores are left out, as scc leaves them out. Code read from databases (which scc can't see) is added as its non-blank lines, and the report says how many.
+- **Generated lines**: the logical lines of files classed as generated (section 8).
+- **Duplication**: like jscpd, it looks for runs of at least 5 lines and 50 tokens that repeat code seen earlier, in the same file or an earlier one; the first copy counts as original and each later copy as duplicated. Lines are compared ignoring their spacing, and comments have already been removed. Runs already seen are remembered in a fixed 32 MB Bloom filter, so memory use doesn't grow with the size of the codebase. The ratio is duplicated logical lines over logical lines.
+- **Primary language**: C and C++ are split by file (`.c` is C, `.h` is a C header, everything else C++), headers going to whichever of C and C++ is larger. Script-specific names are mapped to the form's names (UnityScript as JavaScript, T-SQL and PL/SQL as SQL, Pascal as Object Pascal). A language not on the form's list is shown as "Other", with its own name beside it.
+
+The JSON output keeps both the tools' figures and the estimates.
+
+### Commits
+
+For Git, commits are counted on the main branch: the one `origin/HEAD` names, else `main`, `master`, `trunk` or `develop` (local or on `origin`), else the branch checked out. Merges, commits whose subject contains "revert", and Epic's commits in an Unreal fork are left out. For a subfolder scan, only commits touching the subfolder count.
+
+For systems that don't record merges, changes whose subject starts with "merge", "merged" or "merging", and those whose subject contains "revert", are left out. For SVN, the counted path is shown, with a note if it isn't a trunk (which could include branches). Commits from all histories that could be counted are summed, and the report says if some couldn't be.
+
+### `--reports`
+
+With `--reports`, scc's and jscpd's own JSON reports are saved beside the script's report, for attaching to a form. **jscpd's report holds copies of the duplicated code and the names of the files it is in: look it over before sending it.**
+
+---
+
+## 13. Output
+
+### On screen
+
+Progress is shown on one line that keeps being overwritten (only when the output is a terminal). The full report is printed at the end, followed by where it was saved.
+
+### Files
+
+The report is saved as `size_report_<name>.txt`, where `<name>` is the scanned folder's name (or the file's name, when a single file was given) with every character other than letters and digits replaced by `_`. Beside it:
+
+- `size_report_<name>.json`: the same numbers, for reading by machine.
+- With `--reports`: `size_report_<name>_scc.json` and `size_report_<name>_jscpd.json`.
+
+They are saved next to the script. If that folder can't be written to, they go in the current folder, and failing that, the home folder. If none works, the script says to copy the report from the screen.
+
+### The text report, in order
+
+1. Project name, then a **summary**: apparently original code (with the top three languages), visual-scripting nodes, the first history in one line (changes, people, date range, pull requests), contributors across all histories, the combined SourceSafe and Git history, and the "Check" list.
+2. Project types found; Unreal versions that saved the assets; version control found; total size.
+3. **Apparently original source code** by language, with notes on tests, Epic's and other engines' notices, exact copies, files not committed to Git, and console code.
+4. Original code by folder; folders with their own licence file; text files of unknown kinds.
+5. Blueprints and other visual scripting; how much of the Unreal assets could be measured.
+6. Databases; files holding data; code the project needs that isn't in the folder; package dependencies.
+7. UnrealScript compiled into `.u` packages.
+8. Someone else's code (with its breakdown by library, package or licence), Unreal Engine's own code, translations, generated code, data.
+9. Precompiled libraries, and notes: built Unity game, packaged Unreal game, Git LFS placeholders, linked folders, paths marked by hand, cooked assets, Ren'Py without source, credentials, no assets.
+10. Assets by kind.
+11. Version-control histories, SourceSafe, file dates when there is no history, people named as authors, copyright years, the licence at the top, public repository, submodules, custom engines, nested repositories, and the history caveats.
+12. **Standard measures.**
+13. Problems while scanning, if any. An unexpected error on one file, or in one section of the report, doesn't stop the scan; up to five distinct error messages are listed and the rest of the report is unaffected.
+
+### The JSON file
+
+Top-level keys: `project`, `project_types`, `lines` (files and lines per language for each category: own, test, third-party, engine, generated, translation, data), `own_total`, `duplicate_lines`, `untracked_lines`, `console_lines`, `third_party_by_library`, `folders`, `visual_scripting`, `unreal_coverage`, `unreal_versions`, `assets`, `version_control`, `histories` (rows, reviews and notes of each), `contributors`, `dependencies_not_here`, `precompiled_libraries`, `credentials` (kinds and file counts), `copyright_years`, `licence`, `public_repositories`, `submodules`, `alerts`, `problems`, `standard_measures` (the figures, the estimates beside them, and the tools' versions), `unknown_text_files`, `code_extensions_named` and `databases`. Like the text report, it holds no author names, no code and no credential text.
+
+---
+
+## 14. Command-line reference
+
+```
+python3 size_codebase.py [PATH ...] [options]
+```
+
+On Windows, `py` works in place of `python3`, and so does double-clicking the script.
+
+| Argument | Meaning |
+|---|---|
+| `PATH` | A folder to scan, or a single file (such as an Access database). Several can be given; each is scanned and reported separately. With none, the script asks for folders interactively. |
+| `--third-party PATH` | Count this folder or file as someone else's code. Relative to the scanned folder, or absolute. Repeatable. Overrides every automatic rule. |
+| `--own PATH` | Count this folder or file as the owner's own code, even inside a folder that would otherwise be third-party. Repeatable. |
+| `--code-ext .EXT=NAME[:LIKE]` | Count files with this extension as code in language NAME. LIKE is a language whose comments it shares, for logical-line counting: `text` (default), `C`, `Ada`, `SQL`, `Lisp`, `Python` or `Pascal`. Repeatable. Passed on to scc and jscpd. |
+| `--sql-server SERVER` | Read the code (procedures, functions, views, triggers) from this running SQL Server through `sqlcmd`. Windows sign-in, or `SQLCMDUSER`/`SQLCMDPASSWORD`. Repeatable. |
+| `--sql-database NAME` | With `--sql-server`: read only this database instead of every user database. Repeatable; applies to every server named. |
+| `--sourcesafe PATH` | A Visual SourceSafe database (the folder with `srcsafe.ini`, a copy without it, or its `data` folder) holding this code's history. Repeatable. |
+| `--no-download` | Don't download scc or jscpd. A copy already in the cache, or one installed on `PATH`, is still used; otherwise the figures are estimated. |
+| `--reports` | Also save scc's and jscpd's own JSON reports beside the report. jscpd's contains copies of duplicated code and file names. |
+
+Environment variables the script reads: `SSDIR` (a SourceSafe database), `SQLCMDUSER` and `SQLCMDPASSWORD` (SQL Server sign-in, used by `sqlcmd`), `ASSETSTORE_CACHE_PATH` (a moved Unity Asset Store cache), `P4CONFIG` (the name of Perforce's settings file), `LOCALAPPDATA`, `APPDATA` and `XDG_CACHE_HOME` (standard locations).
+
+Notes on parsing: there is no `--help`. An argument that isn't one of the options above is taken as a path, so a misspelled option is reported as "Not a folder or file". An option given last, without a value, is also taken as a path. `--third-party` and `--own` paths given as relative paths are resolved against each scanned folder in turn.
+
+---
+
+## 15. Limitations, and how to correct them
+
+**Ownership is a heuristic.** "Apparently original" means the code doesn't carry any of the signs of someone else's code described in section 7. It is not a legal finding. Specifically:
+
+- **The owner's own open-source code** that carries an MIT, BSD, Apache or similar licence header, or sits in a folder with a licence file among other code, is counted as third-party. Fix with `--own`.
+- **The owner's code in a folder with a third-party name** (`external`, `vendor`, `fonts`, a Unity `Plugins` folder, a folder that happens to be called `bullet` or `fmt`) is counted as third-party. Fix with `--own`.
+- **A copied-in library without any of the signs** (no licence header, no licence file, an unrecognised folder name) is counted as the owner's. The per-folder breakdown and the duplication figures help find it. Fix with `--third-party`.
+- **Files carrying an engine maker's notice** stay the owner's, with a count shown. If some were copied from the engine, mark them with `--third-party`.
+- **Unity Asset Store packages** are best recognised on the computer that downloaded them. Elsewhere, recognition relies on folder names and package layout, and a renamed package without demos or docs is counted as the owner's.
+- **Git submodules** are judged by their URL's owner. A library forked into the owner's own account counts as the owner's.
+
+**Skipped folders can't be brought back.** Folders skipped as caches, dependencies or build output (section 3) are never entered, so `--own` can't include them. In particular, a folder named `build` at the root of a Unity, Unreal, JavaScript or Python project, `out` or `dist` at the root of a JavaScript project, or `bin`/`obj` at the root of a .NET project, is skipped even if it holds source. Run the script on that folder directly to count it. Symbolic links and junctions are not followed either.
+
+**Extensions can mislead.** `.m` is counted as Objective-C (MATLAB files would be miscounted), `.pl` as Perl (not Prolog), `.inc` and `.v` are not counted, and `.fs` only inside a .NET project. Visual Basic extensions are checked for VB content, but other ambiguous extensions are not. Use `--third-party` to drop files, or `--code-ext` to add an unknown extension. Every non-blank line of a language whose comment syntax the script doesn't know counts as logical in the estimates.
+
+**The main table counts non-blank lines, comments included.** The standard measures count logical lines. Both are shown; they are not expected to match. Files Git ignores are in the main table but not in the standard measures.
+
+**Visual scripting is counted only for Unreal**, in nodes rather than lines. Cooked Unreal assets have no graphs to count, and some licensee-modified package formats can't be read (the report says how many, and how many appear to hold graphs). Construct's event sheets and other engines' visual scripts (stored as data assets) are not counted.
+
+**Histories count what this copy holds.** Unmerged branches are included in the Git commit count (the main-branch count is shown separately), squash merges hide individual commits, deleted branches are gone, and a shallow clone or an imported snapshot loses earlier history. Git LFS placeholders that were never downloaded can't be read; run `git lfs pull` first. TFVC and Plastic give only years, not full dates. Pull-request counts depend on what the hosting service leaves in the repository and on whether the server can be reached with stored credentials; the hosting service's own count is authoritative.
+
+**Contributors are matched by identical strings.** Two identities are one person only if they share an email, a full name, or a distinctive handle. A Perforce user name and a Git email for the same person are not matched unless the same string appears in both. A `.mailmap` file fixes this for Git. People named in code comments are an undercount: most files don't name their author.
+
+**Database code needs the right tools.** Access VBA can only be read on Windows with Microsoft Access installed; a compiled database (`.mde`, `.accde`) has no VBA source at all. mdbtools reads queries and object counts but not VBA. SQL Server code inside `.mdf` or `.bak` files can't be read from the files; use `--sql-server` against a running server. Access macros are counted as objects, not lines. When several `--sql-server` options are given, code from every server is counted, but the Databases section shows the object counts of the last server only.
+
+**SourceSafe**: only the first five databases found are read, only the first is combined with Git, and `.ssa` archives must be restored with SourceSafe's own tools first.
+
+**Duplicate files are exact copies only.** Files that differ by a single byte are not duplicates; near-copies show up in the duplication ratio instead.
+
+**The duplication estimate is approximate.** It uses a Bloom filter, which can very occasionally take a new run of lines for one already seen, and it compares lines after removing comments and spacing, which jscpd does slightly differently. When jscpd can run, its figure is used.
+
+**Check the report before sending it.** It is designed to hold counts and folder names only, but folder, library, package and branch names are the owner's own words, and the "Problems while scanning" section can contain file paths from operating-system error messages. If you use `--reports`, jscpd's report contains source code.
