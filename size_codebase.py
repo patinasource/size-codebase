@@ -18,42 +18,73 @@ If it gets a folder wrong, say so (paths relative to the project folder, or abso
     python3 size_codebase.py "/path/to/project" --third-party Source/Game/SomeLib --own Plugins/MyPlugin
 
 Code in a language it doesn't know (one of the studio's own, say) is listed as text files of unknown
-kinds. Name each extension, optionally with a known language whose comments it shares (text, the
-default, counts every non-blank line; or C, Ada, SQL, Lisp, Python, Pascal); repeatable:
+kinds. Name each extension; it's then counted as code (every non-blank line), and scc and jscpd
+(below) read it as text, or as a known language whose comments it shares (C, Ada, SQL, Lisp, Python
+or Pascal); repeatable:
     python3 size_codebase.py "/path/to/project" --code-ext .par=PARLANSE --code-ext ".atg=DMS grammar:Ada"
 
 Visual SourceSafe: its history is read straight from the SourceSafe database (the folder with
 srcsafe.ini and a data folder), found inside the project, through the SSDIR setting, or where the
-project files say it is. If it's somewhere else, name it; its history is then put together with the
-Git history, without counting work that is in both twice:
+project files say it is, if that's on this computer (a database the project files place on a
+network share isn't opened by itself: name it with --sourcesafe). If it's somewhere else, name it;
+its history is then put together with the Git history, without counting work that is in both twice:
     py size_codebase.py "C:\\path\\to\\project" --sourcesafe "D:\\OldVSS"
 SourceSafe has no server program: its database is just a folder of files, so a copy of it (from a
 backup or an old disk) works as well as the original, as does its data folder on its own.
 
 Microsoft Access and SQL Server: Access databases (.accdb, .mdb ...) are read in full on Windows
-with Microsoft Access installed (on a copy, with their macros and code switched off), and without
-their VBA through mdbtools elsewhere. Code that lives only inside a SQL Server database is read
-from the running server, through sqlcmd, with your Windows sign-in (or set SQLCMDUSER and
-SQLCMDPASSWORD):
+with Microsoft Access installed (on a copy, with their macros and code switched off; if Access
+can't switch them off, the database isn't opened), and without their VBA through mdbtools
+elsewhere. Code that lives only inside a SQL Server database is read from the running server,
+through sqlcmd, with your Windows sign-in (or set SQLCMDUSER and SQLCMDPASSWORD). sqlcmd checks the
+server's certificate; for a server you trust that has its own (self-signed) certificate, add
+--trust-server-certificate:
     py size_codebase.py "C:\\path\\to\\project" --sql-server MYSERVER\\SQLEXPRESS [--sql-database Sales]
 
-It only READS files. It prints a summary and saves it next to this script as
-size_report_<folder>.txt. The report contains counts and folder names only: no source
-code, no file names, no author names. Nothing is uploaded anywhere. From databases it reads
-only code (stored procedures, queries, VBA ...) and the list of objects: never the rows in
-a table, so no customer data. To count
-pull requests and changelists it may ask your own version-control server (GitHub, GitLab,
-Perforce ...) for them, read-only, with the access you already have.
+It doesn't change the project or its history, only reads them (version-control tools may update
+their own caches, such as Mercurial's and Darcs's). It prints a summary and saves it
+next to this script (or, if it can't write there, in the current or home folder) as
+size_report_<folder>.txt, with the same numbers for computers in size_report_<folder>.json. They
+hold counts, and names of folders, branches, languages, libraries and packages (and the
+repository's web address, if anyone can read it): no source code and no author names. They name
+files only where you do (a file given on its own, or marked with --third-party), and error
+messages in them have their paths replaced by <project>, ~ or <path>. From databases it reads
+only code (stored procedures, queries, VBA ...) and the list of objects: never the rows in a
+table, so no customer data. Nothing about the project is uploaded anywhere: servers are only
+asked the questions below.
 
 The report ends with the standard measures buyers' codebase forms ask for: logical lines of code
 and generated lines (scc), duplication (jscpd), commits on the main branch without merges or
-reverts, and the primary language. scc and jscpd are fetched for this, once, from their official
-releases (GitHub, npmjs.org) and checked against fixed checksums; nothing needs installing, and
-they're kept in a cache folder (on Windows %LOCALAPPDATA%\\size_codebase_tools). Without them
-(offline, or with --no-download) the script estimates their figures itself. To also save their own
-reports beside this one, for attaching to a form:
+reverts, and the primary language. scc and jscpd are downloaded for this, once, from their
+official releases (github.com, registry.npmjs.org), over HTTPS with the certificate checked, and
+checked against fixed checksums, as is the program each time before it runs; nothing needs
+installing, and they're kept in a cache folder (on Windows %LOCALAPPDATA%\\size_codebase_tools).
+No other copy of them is ever run. If one can't be downloaded, its figures are left out of the
+report, which says why. To also save their own reports beside this one, for attaching to a form:
     python3 size_codebase.py "/path/to/project" --reports
-(jscpd's report holds copies of the duplicated code: look it over before sending it.)
+(jscpd's report holds copies of the duplicated code and the names of their files: look it over
+before sending it.)
+
+Connecting to other computers. Besides downloading scc and jscpd, it asks servers only for what the
+history needs, read-only, with the access you already have (it never stops to ask for a password):
+  - Git: each remote, for the pull requests it keeps (git ls-remote); GitHub, through its gh
+    command if that's installed and signed in, for the merged pull requests; and GitHub, GitLab or
+    Bitbucket, without signing in, whether anyone can read the repository.
+  - Perforce, Plastic SCM and TFVC, and SVN, CVS or Bazaar where the history is on a server: their
+    own commands ask the server for the history.
+  - --sql-server: that SQL Server. --sourcesafe or SSDIR: the folder named, even on a network share.
+Options:
+  --offline        Connect to no other computer at all: no downloads (a copy of scc or jscpd
+                   downloaded before still runs, after its checksum is checked), no version-control
+                   servers, no network shares besides the folder you name, and no Access database
+                   opened in Microsoft Access. The report says what that left out. Can't be used
+                   with --sql-server.
+  --no-download    Don't download scc or jscpd (copies downloaded before are still used).
+  --reports        Save scc's and jscpd's own reports beside this one (see above).
+  --trust-server-certificate
+                   With --sql-server: trust the server's certificate without checking it (sqlcmd -C).
+  --third-party, --own, --code-ext, --sourcesafe, --sql-server, --sql-database: see above.
+  -h, --help       Show this help.
 
 Needs Python 3.8+ and nothing else (https://www.python.org/downloads/).
 """
@@ -66,6 +97,9 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from stat import S_ISREG
+
+__version__ = "1.0.0"
 
 
 # #######################################
@@ -119,6 +153,37 @@ def count_text_lines(text):
     return sum(1 for line in text.splitlines() if line.strip())
 
 
+# ####################
+# Error messages, for the saved report
+# ####################
+# An error's message can name files and folders ("Permission denied: '/Users/ann/Game/secret.c'"),
+# which the saved report and its .json never do: the scanned folder becomes <project>, the home
+# folder ~, and then whatever still looks like a path or a file name <path>.
+QUOTED_PATH = re.compile(r"""(['"])(?:(?:(?!\1).)*?(?:[\\/]|<project>|~)(?:(?!\1).)*|[^'"\s]+\.[A-Za-z0-9]{1,8})\1""")
+UNQUOTED_PATH = re.compile(r"""(?<![\w.:/\\])(?:<project>|~|[A-Za-z]:)?(?:[\\/]+[^\s\\/'"<>|]+)+[\\/]*""")
+
+
+def scrub(text, root=None):
+    """text (an error's message) without paths or file names in it."""
+    text = str(text)
+    for folder, label in ((root, "<project>"), (os.path.expanduser("~"), "~")):
+        if not folder:
+            continue
+        forms = set()
+        for form in (folder, os.path.abspath(folder), os.path.realpath(folder)):
+            form = short_path(form).rstrip("\\/")
+            forms |= {form, form.replace("\\", "/"), form.replace("/", "\\"), long_path(form)}
+        for form in sorted((f for f in forms if len(f) > 1), key=len, reverse=True):
+            text = re.sub(re.escape(form) + r"(?![\w.-])", label, text, flags=re.I if os.name == "nt" else 0)
+    text = QUOTED_PATH.sub("<path>", text)
+    return UNQUOTED_PATH.sub("<path>", text)
+
+
+def describe(error, root=None):
+    """An exception, for the saved report: its kind and its message, scrubbed."""
+    return f"{type(error).__name__}: {scrub(error, root)}"
+
+
 # ##############################
 # Files and paths
 # ##############################
@@ -151,6 +216,38 @@ def list_files(path):
         return os.listdir(path) if path else []
     except OSError:
         return []
+
+
+def is_network_path(path):
+    """A folder on another computer: \\\\server\\share (or //server/share) or, on Windows, a drive
+    letter mapped to a network share. Reading it means connecting to that computer."""
+    path = (path or "").strip().strip('"')
+    if path.startswith(("\\\\?\\", "\\\\.\\")):   # Windows' long and device paths: \\?\C:\... or \\?\UNC\server\...
+        rest = path[4:]
+        return rest.upper().startswith("UNC\\") or is_network_path(rest)
+    if path.startswith(("\\\\", "//")):
+        return True
+    if os.name == "nt" and re.match(r"^[A-Za-z]:", path):
+        import ctypes
+        drive_remote = 4   # DRIVE_REMOTE
+        try:
+            return ctypes.windll.kernel32.GetDriveTypeW(path[:2] + "\\") == drive_remote
+        except (AttributeError, OSError):
+            return False
+    return False
+
+
+def file_sha256(path):
+    """A file's SHA-256 checksum, or None if it can't be read."""
+    import hashlib
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
 
 
 def is_link(path):
@@ -191,11 +288,16 @@ def is_within(path, folder):
 
 def find_up(path, name, levels=6):
     """Does `name` exist in this folder or one of the folders above it?"""
+    return nearest(path, name, levels) is not None
+
+
+def nearest(path, name, levels=6):
+    """path/name, or the same in the nearest folder above that has it; None if none does."""
     for _ in range(levels):
         if os.path.exists(os.path.join(path, name)):
-            return True
+            return os.path.join(path, name)
         path = os.path.dirname(path)
-    return False
+    return None
 
 
 def is_lfs_pointer(path):
@@ -205,6 +307,41 @@ def is_lfs_pointer(path):
             return f.read(40).startswith(b"version https://git-lfs")
     except OSError:
         return False
+
+
+# ##############################
+# Temporary folders
+# ##############################
+# The temporary folders this script makes, by what they're for: jscpd's report (it holds copies of
+# the duplicated code) and copies of Access databases, with the PowerShell script that reads them.
+# Each is deleted as soon as it's done with; one left behind by a run that was stopped (Ctrl-C) is
+# deleted by a later run, once it's a day old (younger ones may belong to a run still going).
+TEMP_PREFIXES = {"jscpd": "size_codebase_jscpd_", "access": "size_codebase_access_"}
+TEMP_MAX_AGE = 86400   # seconds
+
+
+def temp_folder(kind):
+    import tempfile
+    return tempfile.mkdtemp(prefix=TEMP_PREFIXES[kind])
+
+
+def remove_old_temp_folders():
+    """Deletes this script's temporary folders left behind by earlier runs. Returns how many."""
+    import tempfile
+    import time
+    base, removed = tempfile.gettempdir(), 0
+    for name in list_files(base):
+        path = os.path.join(base, name)
+        if not name.startswith(tuple(TEMP_PREFIXES.values())) or is_link(path) or not os.path.isdir(path):
+            continue
+        try:
+            if time.time() - os.lstat(path).st_mtime < TEMP_MAX_AGE:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        removed += not os.path.exists(path)
+    return removed
 
 
 # ##############################
@@ -241,8 +378,10 @@ WINDOWS_TOOL_PATHS = {
 def tool_path(name):
     """Where a command-line tool is installed. On Windows, tools that came with GitHub Desktop,
     TortoiseSVN, P4V, Visual Studio and the like often aren't on PATH."""
-    found = shutil.which(name)
-    if found or os.name != "nt":
+    if os.name != "nt":
+        return shutil.which(name)
+    found = windows_program(name, os.environ.get("PATH", ""))
+    if found:
         return found
     import glob
     for pattern in WINDOWS_TOOL_PATHS.get(name, []):
@@ -252,13 +391,79 @@ def tool_path(name):
     return None
 
 
-def command(args):
-    """args with the tool's full path. Git is told to trust any repository: it otherwise refuses
-    ones on drives owned by another user account (external drives, exFAT, copied folders)."""
+def windows_program(name, path):
+    """name.exe (or .com) in one of the folders on path (Windows' PATH), or None. Not shutil.which,
+    which on Windows looks in the current folder first (so a project's own git.exe would run if this
+    were started from inside it), and also finds .bat and .cmd files, which Windows runs through
+    cmd.exe, which can read their arguments as more commands."""
+    if os.path.dirname(name):   # a full path already (scc's and jscpd's, say)
+        return name if os.path.isfile(name) else None
+    for folder in path.split(os.pathsep):
+        folder = folder.strip().strip('"')
+        if not folder or not os.path.isabs(folder):   # "" and "." mean the current folder
+            continue
+        for ext in (".exe", ".com"):
+            candidate = os.path.join(folder, name + ext)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def command(args, logins=False):
+    """args with the tool's full path, and for git the settings below. logins: let git use the
+    user's own credential helpers and password prompts (only for asking a server, from outside the
+    repository: see ls_remote)."""
     exe = tool_path(args[0])
     if exe is None:
         return None
-    return [exe, "-c", "safe.directory=*", *args[1:]] if args[0] == "git" else [exe, *args[1:]]
+    if args[0] != "git":
+        return [exe, *args[1:]]
+    exceptions = [o for repo in _git_other_owners for o in ("-c", f"safe.directory={repo}")]
+    return [exe, *GIT_SAFE_OPTIONS, *([] if logins else GIT_NO_LOGINS), *exceptions, *args[1:]]
+
+
+# ####################
+# Git, safely
+# ####################
+# Settings in a repository's own configuration that would make git run a program, overridden on
+# every git command, as a repository copied from elsewhere could hold any of them: hooks, an
+# fsmonitor program, an external diff program (diff commands also get GIT_NO_PROGRAMS, for diff
+# drivers and textconv), a signature checker (log.showSignature runs gpg.program), credential
+# helpers and password prompts (GIT_NO_LOGINS), and the ext:: transport, which runs any command.
+# core.sshCommand is outranked by GIT_SSH_COMMAND, set in quiet_env; core.gitProxy, the remote's
+# uploadpack and the like only apply where git contacts a server, which happens outside the
+# repository (ls_remote). Lazy fetches of a partial clone, and every other connection outside
+# ls_remote, are turned off in quiet_env.
+GIT_SAFE_OPTIONS = ["-c", "core.fsmonitor=", "-c", "core.hooksPath=" + os.devnull, "-c", "diff.external=",
+                    "-c", "log.showSignature=false", "-c", "protocol.ext.allow=never",
+                    "-c", "uploadpack.packObjectsHook="]
+GIT_NO_LOGINS = ["-c", "credential.helper=", "-c", "core.askPass="]
+GIT_NO_PROGRAMS = ["--no-ext-diff", "--no-textconv"]
+# Git refuses a repository that belongs to another user account (on an external drive, or copied
+# from another computer): its settings could run programs as whoever reads it. With the settings
+# above overridden, it's read anyway, naming just that repository as safe (never "safe.directory=*").
+DUBIOUS_OWNERSHIP = re.compile(r"dubious ownership in repository at '([^'\r\n]+)'"
+                               r"|unsafe repository \('([^'\r\n]+)' is owned by someone else\)")
+_git_other_owners = []   # those repositories, as git names them (see run); emptied for each project
+
+
+def other_owners_repository(stderr):
+    """The repository git refused for belonging to another user account, as git names it (always
+    with forward slashes, as safe.directory needs them on Windows too), or None."""
+    m = DUBIOUS_OWNERSHIP.search(stderr or "")
+    return (m.group(1) or m.group(2)).replace("\\", "/") if m else None
+
+
+# ####################
+# Connecting to other computers
+# ####################
+OFFLINE = False            # --offline: connect to no other computer at all
+_left_out_offline = []     # what --offline left out of the project's report; emptied for each project
+
+
+def left_out_offline(what):
+    if what not in _left_out_offline:
+        _left_out_offline.append(what)
 
 
 # ####################
@@ -287,23 +492,35 @@ def progress(message=None):
 
 def quiet_env():
     """Never stop to ask for a password: if a server needs one we don't already have, skip it. And
-    plain, UTF-8 output whatever the user's settings."""
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never", HGPLAIN="1", HGENCODING="utf-8",
-               PYTHONIOENCODING="utf-8")
+    plain, UTF-8 output whatever the user's settings. Mercurial ignores a repository's own settings,
+    whose hooks and extensions could run programs (HGRCSKIPREPO; 5.4 and later, see hg_history). Git
+    never fetches what a partial clone left on the server (GIT_NO_LAZY_FETCH), and may use no
+    transport at all (GIT_ALLOW_PROTOCOL empty), so it can't connect anywhere, even before Git 2.44,
+    which ignores GIT_NO_LAZY_FETCH (a lazy fetch follows the repository's own settings for its
+    remote). Only ls_remote, which asks servers, allows some transports, and not with --offline."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never", GIT_NO_LAZY_FETCH="1", HGPLAIN="1",
+               HGENCODING="utf-8", HGRCSKIPREPO="1", PYTHONIOENCODING="utf-8", GIT_ALLOW_PROTOCOL="")
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
     return env
 
 
-def run(args, cwd, timeout=900):
-    """stdout of a command, or None if it isn't installed, fails or takes too long."""
-    args = command(args)
-    if args is None:
+def run(args, cwd, timeout=900, env=None, logins=False):
+    """stdout of a command, or None if it isn't installed, fails or takes too long. env: more
+    environment variables; logins: see command(). A git command refused because the repository
+    belongs to another user account is run again, naming that repository as safe (see
+    DUBIOUS_OWNERSHIP)."""
+    full = command(args, logins)
+    if full is None:
         return None
-    env = quiet_env()
+    env = dict(quiet_env(), **(env or {}))
     env["PWD"] = os.path.abspath(cwd)   # p4 finds its settings (P4CONFIG) from $PWD, not the real folder
     try:
-        out = subprocess.run(args, cwd=cwd, capture_output=True, timeout=timeout, env=env,
-                             stdin=subprocess.DEVNULL)
+        out = subprocess.run(full, cwd=cwd, capture_output=True, timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+        repo = other_owners_repository(out.stderr.decode("utf-8", "replace")) if args[0] == "git" else None
+        if out.returncode != 0 and repo and repo not in _git_other_owners:
+            _git_other_owners.append(repo)
+            out = subprocess.run(command(args, logins), cwd=cwd, capture_output=True, timeout=timeout, env=env,
+                                 stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout.decode("utf-8", "replace") if out.returncode == 0 else None
@@ -546,6 +763,9 @@ def find_custom_engine(project_dir, association):
             d = os.path.dirname(d)
             candidates.append(d)
     for candidate in candidates:
+        if candidate and association and OFFLINE and is_network_path(candidate):
+            left_out_offline("the custom Unreal Engine this project is built with, registered on a network share")
+            continue
         if candidate and find_path(candidate, "Engine", "Build", "Build.version"):
             return os.path.abspath(short_path(candidate))
         if candidate and os.path.basename(candidate.rstrip("/\\")).lower() == "engine" and \
@@ -886,7 +1106,7 @@ def asset_store_download_folders():
     folders = [os.path.join(base, n) for n in list_files(base) if n.lower().startswith("asset store")]
     if os.environ.get("ASSETSTORE_CACHE_PATH"):   # Unity 2022+ lets the cache be moved
         folders.append(os.environ["ASSETSTORE_CACHE_PATH"])
-    return folders
+    return [f for f in folders if not (OFFLINE and is_network_path(f))]   # --offline: not even on a network share
 
 
 ASSET_STORE_TIME_LIMIT = 300   # seconds spent reading downloaded packages, at most
@@ -946,99 +1166,15 @@ def meta_guid(path):
 # #######################################
 
 # ##############################
-# Logical lines
-# ##############################
-
-# ####################
-# Comment syntax by language
-# ####################
-
-# How each language writes comments, to count logical lines (lines with code on them: not blank and
-# not only a comment) the way scc does. Strings are matched too, as "keep", so that a // or # inside
-# one isn't taken for a comment.
-def comment_syntax(comments, strings=(rb'"(?:\\.|[^"\\\n])*"', rb"'(?:\\.|[^'\\\n])*'"), first=()):
-    """first: comments that win over strings starting at the same place (Python's docstrings)."""
-    keep = b"(?P<keep>" + b"|".join(strings) + b")" if strings else b"(?P<keep>(?!))"
-    return re.compile(b"|".join([*first, keep, *comments]), re.S | re.M)
-
-
-SLASHES, STARS = rb"//[^\n]*", rb"/\*.*?(?:\*/|\Z)"
-HASH, DASHES, SEMICOLON = rb"#[^\n]*", rb"--[^\n]*", rb";[^\n]*"
-DQ, SQ = rb'"(?:\\.|[^"\\\n])*"', rb"'(?:\\.|[^'\\\n])*'"
-SQL_SQ, VB_DQ = rb"'(?:[^'\n]|'')*'", rb'"(?:[^"\n]|"")*"'
-TRIPLE_QUOTED = rb'(?:"""(?:\\.|[^\\])*?(?:"""|\Z)|\'\'\'(?:\\.|[^\\])*?(?:\'\'\'|\Z))'
-BACKTICKS = rb"`(?:\\.|[^`\\])*`"
-CPP_RAW = rb'R"(?P<delimiter>[^()\\\s"]{0,16})\(.*?\)(?P=delimiter)"'
-C_COMMENTS = comment_syntax([SLASHES, STARS], [CPP_RAW, DQ, SQ, BACKTICKS])
-HASH_COMMENTS = comment_syntax([HASH])
-COMMENT_SYNTAX = {
-    **dict.fromkeys(
-        [".c", ".cc", ".cpp", ".cxx", ".c++", ".cppm", ".ixx", ".ipp", ".tcc", ".h", ".hh", ".hpp", ".hxx", ".h++",
-         ".inl", ".cu", ".cuh", ".m", ".mm", ".java", ".kt", ".scala", ".swift", ".go", ".rs", ".dart",
-         ".groovy", ".gradle", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".as", ".hx", ".gml",
-         ".uc", ".uci", ".sk", ".zig", ".agc", ".ink", ".yarn", ".css", ".scss", ".sass", ".less", ".pli", ".pl1",
-         ".sv", ".svh", ".vh", ".rpgle", ".sqlrpgle", ".shader", ".cginc", ".hlsl", ".glsl", ".compute", ".usf",
-         ".ush", ".fx", ".fxh", ".cg", ".vert", ".frag", ".geom", ".tesc", ".tese", ".vsh", ".psh", ".metal",
-         ".wgsl", ".slang", ".gdshader", ".gdshaderinc", ".glslinc", ".fs", ".fsx"], C_COMMENTS),
-    ".cs": comment_syntax([SLASHES, STARS], [rb'\$?@\$?"(?:[^"]|"")*"', rb'\$*"""+.*?"""+', DQ, SQ]),   # @"verbatim", """raw"""
-    **dict.fromkeys([".sh", ".bash", ".rb", ".pl", ".gd", ".rpy", ".rpym", ".cmake", ".ex", ".exs", ".tcl", ".verse",
-                     ".coffee", ".nim"], HASH_COMMENTS),
-    **dict.fromkeys([".py", ".pyi", ".pyx"], comment_syntax(
-        [HASH], [rb"[rRuUbBfF]{0,2}" + TRIPLE_QUOTED, DQ, SQ], first=[rb"^[ \t]*[rRuU]?" + TRIPLE_QUOTED])),
-    **dict.fromkeys([".php", ".nut"], comment_syntax([SLASHES, STARS, HASH])),
-    ".ps1": comment_syntax([rb"<#.*?(?:#>|\Z)", HASH]),
-    **dict.fromkeys([".lua", ".luau", ".moon"], comment_syntax(
-        [rb"--\[(?P<level>=*)\[.*?(?:\](?P=level)\]|\Z)", DASHES], [DQ, SQ, rb"\[\[.*?(?:\]\]|\Z)"])),
-    **dict.fromkeys([".sql", ".tsql", ".pks", ".pkb", ".prc", ".fnc"], comment_syntax([DASHES, STARS], [SQL_SQ])),
-    **dict.fromkeys([".adb", ".ads", ".vhd", ".vhdl"], comment_syntax([DASHES], [DQ])),
-    ".hs": comment_syntax([DASHES, rb"\{-.*?(?:-\}|\Z)"], [DQ]),
-    **dict.fromkeys([".vb", ".bas", ".cls", ".frm", ".ctl", ".dsr", ".pag", ".dob", ".vbs", ".monkey", ".monkey2"],
-                    comment_syntax([rb"'[^\n]*", rb"(?i:^[ \t]*rem\b[^\n]*)"], [VB_DQ])),
-    ".bmx": comment_syntax([rb"'[^\n]*", rb"(?i:^[ \t]*rem\b.*?(?:^[ \t]*end[ \t]?rem\b[^\n]*|\Z))"], [VB_DQ]),
-    **dict.fromkeys([".bat", ".cmd"], comment_syntax([rb"(?i:^[ \t]*(?:@?rem\b|::)[^\n]*)"], [])),
-    **dict.fromkeys([".asm", ".clj", ".bb", ".nani"], comment_syntax([SEMICOLON])),
-    ".erl": comment_syntax([rb"%[^\n]*"]),
-    **dict.fromkeys([".html", ".htm"], comment_syntax([rb"<!--.*?(?:-->|\Z)"], [])),
-    **dict.fromkeys([".vue", ".svelte"], comment_syntax([rb"<!--.*?(?:-->|\Z)", SLASHES, STARS], [DQ, SQ])),
-    **dict.fromkeys([".pas", ".dpr"], comment_syntax([SLASHES, rb"\{(?!\$).*?(?:\}|\Z)", rb"\(\*.*?(?:\*\)|\Z)"],
-                                                     [SQL_SQ])),
-    ".ml": comment_syntax([rb"\(\*.*?(?:\*\)|\Z)"], [DQ]),
-    # COBOL: a * or / in column 7 (fixed format), or *> anywhere. Fortran: !, or C or * in column 1
-    # (fixed form). ABAP: * in column 1, or ". JCL: //* .
-    **dict.fromkeys([".cbl", ".cob", ".cpy"], comment_syntax([rb"^[^\n]{6}[*/][^\n]*", rb"\*>[^\n]*"])),
-    **dict.fromkeys([".f", ".for", ".f77"], comment_syntax([rb"![^\n]*", rb"^[cC*][^\n]*"])),
-    **dict.fromkeys([".f90", ".f95", ".f03", ".f08"], comment_syntax([rb"![^\n]*"])),
-    ".abap": comment_syntax([rb"^\*[^\n]*", rb'"[^\n]*'], [SQ, rb"`[^`\n]*`", rb"\|[^|\n]*\|"]),
-    ".jcl": comment_syntax([rb"^//\*[^\n]*"], []),
-}
-
-
-def _drop_comment(m):
-    """A comment becomes blank lines; a string stays, its blank lines marked with a NUL so that they
-    count as code, as scc counts them."""
-    text = m.group(0)
-    return text.replace(b"\n", b"\n\0") if m.lastgroup == "keep" else b"\n" * text.count(b"\n")
-
-
-def code_lines(text, ext):
-    """A file's logical lines (see COMMENT_SYNTAX), stripped. Languages whose comments aren't known
-    here count every non-blank line."""
-    syntax = COMMENT_SYNTAX.get(ext)
-    if syntax is not None:
-        text = syntax.sub(_drop_comment, text)
-    return [line.strip() for line in text.splitlines() if line.strip()]
-
-
-# ####################
 # Languages named with --code-ext
-# ####################
+# ##############################
 # Languages this script doesn't know, named with --code-ext (".par=PARLANSE", ".atg=DMS grammar:Ada"):
-# extension -> (name, the known language whose comments it shares). Every non-blank line of "text"
-# counts. For each known language: a file extension with its comments here, scc's name, jscpd's.
+# extension -> (name, the known language whose comments it shares). This script counts every
+# non-blank line of them, as of every language; scc and jscpd are told to read them as that known
+# language (scc's name for it, jscpd's), "text" (the default) as plain text.
 EXTRA_CODE = {}
-LIKE_LANGUAGES = {"text": (None, "Plain Text", "txt"), "C": (".c", "C", "c"), "Ada": (".adb", "Ada", "ada"),
-                  "SQL": (".sql", "SQL", "sql"), "Lisp": (".clj", "Lisp", "lisp"), "Python": (".py", "Python", "python"),
-                  "Pascal": (".pas", "Pascal", "pascal")}
+LIKE_LANGUAGES = {"text": ("Plain Text", "txt"), "C": ("C", "c"), "Ada": ("Ada", "ada"), "SQL": ("SQL", "sql"),
+                  "Lisp": ("Lisp", "lisp"), "Python": ("Python", "python"), "Pascal": ("Pascal", "pascal")}
 
 
 def add_code_extension(spec):
@@ -1054,11 +1190,6 @@ def add_code_extension(spec):
         raise ValueError(f"--code-ext {spec!r}: {m.group(3)!r} isn't one of {', '.join(LIKE_LANGUAGES)}")
     EXTRA_CODE[ext] = (name, like)
     CODE_EXTS[ext] = name
-    sample = LIKE_LANGUAGES[like][0]
-    if sample:
-        COMMENT_SYNTAX[ext] = COMMENT_SYNTAX[sample]
-    else:
-        COMMENT_SYNTAX.pop(ext, None)
 
 
 # ##############################
@@ -1158,13 +1289,12 @@ def secrets_in(data):
 # ##############################
 
 def read_code_file(path, ext):
-    """What's in one source file, as a dict: lines (non-blank), code (its logical lines, stripped:
-    see code_lines), generated, licence (the library or licence its header names, or EPIC_NOTICE,
-    or None), data (mostly an embedded data array, not code), includes (#include paths, C-family
-    only), years (in copyright notices), authors (people named as authors in comments, see
-    authors_in), secrets (kinds of credentials found) and digest (to spot the same file in several
-    places)."""
-    facts = {"lines": 0, "code": [], "generated": False, "licence": None, "data": False, "includes": [], "years": [],
+    """What's in one source file, as a dict: lines (non-blank), generated, licence (the library or
+    licence its header names, or EPIC_NOTICE, or None), data (mostly an embedded data array, not
+    code), includes (#include paths, C-family only), years (in copyright notices), authors (people
+    named as authors in comments, see authors_in), secrets (kinds of credentials found) and digest
+    (to spot the same file in several places)."""
+    facts = {"lines": 0, "generated": False, "licence": None, "data": False, "includes": [], "years": [],
              "authors": [], "secrets": set(), "digest": None}
     try:
         with open(path, "rb") as f:
@@ -1179,7 +1309,6 @@ def read_code_file(path, ext):
     text = as_text(data)
     lines = [line for line in text.splitlines() if line.strip()]
     facts["lines"] = len(lines)
-    facts["code"] = code_lines(text, ext)
     facts["digest"] = hashlib.sha1(data).hexdigest()
 
     # ####################
@@ -1986,10 +2115,14 @@ def git_history(root):
     # ####################
     found = scan.reviews_found()
     unreachable = []
-    for remote, count in git_server_pull_requests(root, unreachable):
-        found.append((f"all pull requests on {remote} (open, closed, merged)", count))
-    for remote, count in github_merged_pull_requests(root):
-        found.append((f"merged pull requests on GitHub ({remote})", count))
+    if OFFLINE:
+        if git_remotes(root):
+            left_out_offline("pull requests on the Git server (asked with git ls-remote and GitHub's gh)")
+    else:
+        for remote, count in git_server_pull_requests(root, unreachable):
+            found.append((f"all pull requests on {remote} (open, closed, merged)", count))
+        for remote, count in github_merged_pull_requests(root):
+            found.append((f"merged pull requests on GitHub ({remote})", count))
     for remote in unreachable:
         found.append((f"pull requests on {remote}", "couldn't connect"))
 
@@ -2047,7 +2180,8 @@ def engine_changes_without_epic_history(root, pathspec):
     ones later changed again."""
     progress(f"Measuring the engine changes in {os.path.basename(root)} ...")
     branch = studio_branch(root)
-    out = run(["git", "log", "--no-merges", "--format=%x1e", "--shortstat", branch, *(pathspec or ["--"])], root, 3600)
+    out = run(["git", "log", "--no-merges", *GIT_NO_PROGRAMS, "--format=%x1e", "--shortstat", branch,
+               *(pathspec or ["--"])], root, 3600)
     progress()
     if out is None:
         return []
@@ -2091,7 +2225,7 @@ def changes_to_epic_code(root, pathspec):
         progress()
         return []
     sha, body = base.split("\x1f", 1)
-    stat = run(["git", "diff", "--shortstat", sha.strip(), branch, *(pathspec or ["--"])], root) or ""
+    stat = run(["git", "diff", *GIT_NO_PROGRAMS, "--shortstat", sha.strip(), branch, *(pathspec or ["--"])], root) or ""
     progress()
     numbers = {}
     for n, what in re.findall(r"(\d+) (file|insertion|deletion)", stat):
@@ -2118,15 +2252,40 @@ def git_remotes(root):
     return out
 
 
+GIT_REMOTE_PROTOCOLS = "https:http:ssh:git:file"   # file: a repository in a folder on this computer
+
+
+def remote_on_network_share(url):
+    """Is this remote a repository in a folder on another computer (\\\\server\\share\\game.git,
+    file://server/...)? Such a remote keeps no pull requests (hosting services do), and opening it
+    would connect to whatever computer the repository's settings name."""
+    return is_network_path(url) or bool(re.match(r"(?i)^file://(?!/)", url))
+
+
+def ls_remote(root, url, *patterns, options=(), login=True, timeout=180):
+    """git ls-remote's output for the repository at url, or None. Run outside the repository (as if
+    it weren't one: GIT_DIR names nothing), so that only the user's own git settings apply, never the
+    repository's, which could run a program or turn off certificate checks. Relative paths start from
+    the repository's top folder. login=False: ask as anyone would, without the user's logins. Only
+    git's own transports may be used (GIT_REMOTE_PROTOCOLS), not a helper program a URL could name."""
+    if OFFLINE:
+        return None
+    top = git_top(root) or root
+    return run(["git", "ls-remote", *options, "--", url, *patterns], top, timeout, logins=login,
+               env={"GIT_DIR": os.devnull, "GIT_ALLOW_PROTOCOL": GIT_REMOTE_PROTOCOLS,
+                    **({} if login else {"GIT_ASKPASS": ""})})
+
+
 def git_server_pull_requests(root, unreachable=None):
     """[(remote, number of pull requests)]. GitHub, GitLab and Bitbucket Server keep a ref for every
     pull request ever opened (refs/pull/N/..., refs/merge-requests/N/..., refs/pull-requests/N/...).
     Remotes that can't be reached (say, they need a login we don't have) are added to `unreachable`."""
     found = []
-    for remote, _ in git_remotes(root):
+    for remote, url in git_remotes(root):
+        if remote_on_network_share(url):
+            continue
         progress(f"Asking {remote} for its pull requests ...")
-        refs = run(["git", "ls-remote", remote, "refs/pull/*", "refs/merge-requests/*", "refs/pull-requests/*"],
-                   root, 180)
+        refs = ls_remote(root, url, "refs/pull/*", "refs/merge-requests/*", "refs/pull-requests/*") if url else None
         progress()
         if refs is None and unreachable is not None:
             unreachable.append(remote)
@@ -2140,12 +2299,14 @@ def github_merged_pull_requests(root):
     """[(remote, merged pull requests)] for GitHub remotes, asked through GitHub's own command-line
     tool (gh), if it's installed and logged in."""
     found = []
-    for remote, url in git_remotes(root):
+    for remote, url in ([] if OFFLINE else git_remotes(root)):
         m = re.search(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", url)
         if not m:
             continue
+        # Run from the temporary folder, not the repository, so that gh has no repository to read.
+        import tempfile
         out = run(["gh", "api", "-X", "GET", "search/issues", "-f", f"q=repo:{m.group(1)}/{m.group(2)} is:pr is:merged",
-                   "--jq", ".total_count"], root, 60)
+                   "--jq", ".total_count"], tempfile.gettempdir(), 60)
         if out and out.strip().isdigit():
             found.append((remote, int(out.strip())))
     return found
@@ -2189,6 +2350,8 @@ def git_standard_commits(root, pathspec):
 def perforce_history(root):
     """Submitted changelists under this folder, if it's in a Perforce workspace and p4 is logged in."""
     path = os.path.join(root, "...")
+    if perforce_port_starts_a_program(root):
+        return None
     if not (run(["p4", "changes", "-m", "1", "-s", "submitted", path], root, 20) or "").startswith("Change "):
         return None
     out = run(["p4", "changes", "-l", "-s", "submitted", path], root) or ""
@@ -2232,7 +2395,21 @@ def svn_history(root):
     return h
 
 
+HG_SKIPS_REPOSITORY_SETTINGS = (5, 4)   # the first Mercurial that obeys HGRCSKIPREPO (see quiet_env) everywhere
+
+
+def hg_skips_repository_settings():
+    """Is this Mercurial new enough to ignore a repository's own settings (.hg/hgrc), whose hooks and
+    extensions could run programs? Older ones read them whatever HGRCSKIPREPO says. Asked from the
+    temporary folder, where no repository's settings apply."""
+    import tempfile
+    m = re.search(r"version (\d+)\.(\d+)", run(["hg", "version", "-q"], tempfile.gettempdir(), 60) or "")
+    return bool(m) and (int(m.group(1)), int(m.group(2))) >= HG_SKIPS_REPOSITORY_SETTINGS
+
+
 def hg_history(root):
+    if not hg_skips_repository_settings():
+        return None
     out = run(["hg", "log", "--template",
                "{date|shortdate}\\x1f{author|person}\\x1f{author|email}\\x1f{p2rev}\\x1f{desc}\\x1e", "."], root)
     changes, merges, scan = [], 0, MessageScan()
@@ -2265,7 +2442,8 @@ def bzr_history(root):
 def darcs_history(root):
     # At the repository's root, "." would match nothing; darcs may print a notice before the XML.
     here = [] if os.path.isdir(os.path.join(root, "_darcs")) else ["."]
-    out = run(["darcs", "log", "--xml-output", *here], root)
+    # Its settings (_darcs/prefs/defaults) can name hooks: programs to run with any command.
+    out = run(["darcs", "log", "--xml-output", "--no-prehook", "--no-posthook", *here], root)
     if not out or "<changelog" not in out:
         return None
     import xml.etree.ElementTree as ET
@@ -2295,6 +2473,8 @@ def fossil_history(root):
 def cvs_history(root):
     """CVS keeps a history per file; a commit is the file revisions sharing a commit id (or, from
     before CVS had them, the same author, minute and message)."""
+    if cvs_root_starts_a_program(cvs_root(root)):
+        return None
     out = run(["cvs", "-q", "log"], root)
     commits = {}
     for m in re.finditer(r"^revision [\d.]+\n(date: (\d{4}[-/]\d\d[-/]\d\d) (\d\d:\d\d)[^\n]*?author: ([^;]+);[^\n]*)\n"
@@ -2340,6 +2520,62 @@ def plastic_history(root):
                    reviews=[("Plastic code reviews", review_count)] + scan.reviews_found(), scan=scan)
 
 
+# ####################
+# Where their history comes from
+# ####################
+# Most of these systems keep the history on the computer; a few ask their server for it. A copied
+# folder's settings name that server, and two of them can name a program to start instead: a CVS
+# root can set CVS_RSH (":ext;CVS_RSH=...:"), or pass ssh an option as a host name ("-oProxyCommand=..."),
+# and a Perforce P4PORT of "rsh:..." starts a command. Neither is used unless the user set it.
+
+def cvs_root(root):
+    """The CVS root (where the repository is) recorded in this checkout, or ""."""
+    try:
+        with open(nearest(root, os.path.join("CVS", "Root")) or "", encoding="latin-1") as f:
+            return f.readline().strip()
+    except OSError:
+        return ""
+
+
+def cvs_root_starts_a_program(cvsroot):
+    return bool(re.match(r"^:[^:]*;", cvsroot) or re.match(r"^(:[^:]*:)?([^@:/\\]*@)?-", cvsroot))
+
+
+def perforce_port_starts_a_program(root):
+    """Is p4 set (by a settings file in the folder, P4CONFIG, or the registry, not by the user's own
+    P4PORT variable) to start a program, "rsh:<command>"? p4 set reads the settings without asking
+    the server."""
+    out = run(["p4", "set", "-q", "P4PORT"], root, 20) or ""
+    port = next((line.split("=", 1)[1].strip() for line in out.splitlines() if line.upper().startswith("P4PORT=")), "")
+    return port.lower().startswith("rsh:") and port != os.environ.get("P4PORT", "").strip()
+
+
+def history_from_server(name, root):
+    """Would reading this system's history here connect to its server? Plastic SCM and TFVC always
+    ask theirs; SVN does unless its repository is a folder on this computer (file://); CVS unless
+    its root is local; Bazaar when this is a lightweight checkout of a branch elsewhere. The others
+    hold their whole history in the working copy."""
+    if name in ("Plastic SCM", "Team Foundation (TFVC)"):
+        return True
+    if name == "SVN":
+        url = run(["svn", "info", "--show-item", "repos-root-url", "--non-interactive", root], root, 60) or ""
+        return not url.strip().lower().startswith("file://")
+    if name == "CVS":
+        cvsroot = cvs_root(root)
+        if cvsroot.startswith(":"):
+            return cvsroot[1:].split(":", 1)[0].split(";", 1)[0].lower() not in ("local", "fork")
+        return bool(re.match(r"^[^/\\:]{2,}:", cvsroot))   # host:/path, as opposed to /path or C:\path
+    if name == "Bazaar":
+        bzr = nearest(root, ".bzr")
+        try:
+            with open(os.path.join(bzr or "", "branch", "location"), encoding="utf-8") as f:
+                location = f.read().strip()
+        except OSError:
+            return False   # not a lightweight checkout: the history is here
+        return bool(re.match(r"^[a-z][a-z0-9+.-]+:", location, re.I)) and not location.lower().startswith("file:")
+    return False
+
+
 # ##############################
 # Finding the version control
 # ##############################
@@ -2383,6 +2619,14 @@ def version_control(root):
             found.append(f"{name} (its history can't be read by this script: please ask for an export)")
         elif not any(tool_path(t) for t in tools):
             found.append(f"{name} (but the {tools[0]} command isn't installed, so no history)")
+        elif OFFLINE and history_from_server(name, root):
+            found.append(f"{name} (history not read: it comes from the {name} server, and --offline was given)")
+            left_out_offline(f"the {name} history (read from its server)")
+        elif name == "CVS" and cvs_root_starts_a_program(cvs_root(root)):
+            found.append("CVS (history not read: the checkout's CVS/Root would start a program to reach the server)")
+        elif name == "Mercurial" and not hg_skips_repository_settings():
+            found.append("Mercurial (history not read: this hg is older than 5.4, so it would obey the repository's own"
+                         " settings, which can start programs; update Mercurial to include it)")
         else:
             h = read(root)
             if h:
@@ -2398,10 +2642,19 @@ def version_control(root):
     # ####################
     # Perforce settings often live in the registry or environment rather than a file, so ask p4.
     p4_marker = any(find_up(root, m) for m in PERFORCE_MARKERS | {os.environ.get("P4CONFIG", ".p4config")})
+    if OFFLINE:   # p4 asks the server even whether this folder is in a workspace
+        if p4_marker or tool_path("p4"):
+            left_out_offline("Perforce: whether this folder is in a Perforce workspace, and its changelists"
+                             " (p4 asks the server)")
+        if p4_marker:
+            found.append("Perforce (history not read: it comes from the Perforce server, and --offline was given)")
+        return found, [h for h in histories if h]
     p4 = perforce_history(root)
     if p4:
         found.append("Perforce")
         histories.append(p4)
+    elif p4_marker and tool_path("p4") and perforce_port_starts_a_program(root):
+        found.append("Perforce (history not read: its settings file would start a program to reach the server)")
     elif p4_marker:
         found.append("Perforce (no history: is p4 installed and logged in?)" if tool_path("p4")
                      else "Perforce (but the p4 command isn't installed, so no history)")
@@ -2418,8 +2671,9 @@ def history_lines(h, indent=""):
         out.append(f"{indent}  Pull requests and code reviews found:")
         out += [f"{indent}    {k:<50} {fmt(v):>12}" for k, v in h["reviews"]]
     elif h["vcs"] == "Git":
-        out.append(f"{indent}  Pull requests: none found in commit messages or on the server (which doesn't mean there"
-                   " were none)")
+        out.append(f"{indent}  Pull requests: none found in commit messages"
+                   + (" (the server wasn't asked: --offline)" if OFFLINE else
+                      " or on the server (which doesn't mean there were none)"))
     per_year = h.get("per_year") or {}
     if len(per_year) > 1:
         line = ", ".join(f"{year}: {n:,}" for year, n in per_year.items())
@@ -2515,7 +2769,9 @@ def vss_data_path(db):
                     data = m.group(1)
     except OSError:
         pass
-    return os.path.join(db, data)
+    # A srcsafe.ini can name a data folder on any computer (\\server\share\data): that isn't opened,
+    # like the databases project files name there (see SourceSafe.histories); its own one is.
+    return os.path.join(db, "data" if is_network_path(data) else data)
 
 
 def vss_item_revisions(buf):
@@ -2618,7 +2874,14 @@ class SourceSafe:
         self.bound_folders = 0
         self.archives = 0    # SourceSafe archive files (.ssa), which only SourceSafe itself can restore
         self.recorded = []   # database locations named in project files
-        for db in list(extra_databases) + [os.environ.get("SSDIR", "")]:
+        self.on_network = []  # those on another computer: not opened (see histories)
+        # --sourcesafe and SSDIR are the user's own settings, so they may name a network share, but
+        # with --offline it isn't opened (main() refuses --sourcesafe naming one).
+        ssdir = os.environ.get("SSDIR", "")
+        if OFFLINE and is_network_path(ssdir):
+            left_out_offline("the SourceSafe database the SSDIR setting names, on a network share")
+            ssdir = ""
+        for db in list(extra_databases) + [ssdir]:
             self.add_database(db)
 
     # ####################
@@ -2664,9 +2927,14 @@ class SourceSafe:
         return False
 
     def histories(self):
-        """[(database, history)] of the databases found, including ones the project files name."""
+        """[(database, history)] of the databases found, including ones the project files name on
+        this computer. Ones they name on another computer aren't opened: the project files could
+        name any server, and the user can name it with --sourcesafe."""
         for where in self.recorded:
-            self.add_database(where)
+            if is_network_path(where):
+                self.on_network.append(where)
+            else:
+                self.add_database(where)
         return [(db, h) for db, h in ((db, read_sourcesafe(db)) for db in self.databases[:5]) if h]
 
 
@@ -2684,7 +2952,7 @@ def imported_git_history(root, h):
     out = {"pre_git": pre_git, "vss_messages": h.get("vss_messages", 0), "bulk_start": None}
     roots = (run(["git", "rev-list", "--max-parents=0", "HEAD"], root, 120) or "").split()[:5]
     for sha in roots:
-        stat = run(["git", "show", "--format=%ad", "--date=short", "--shortstat", sha], root, 300) or ""
+        stat = run(["git", "show", *GIT_NO_PROGRAMS, "--format=%ad", "--date=short", "--shortstat", sha], root, 300) or ""
         files = re.search(r"(\d+) files? changed", stat)
         if files and int(files.group(1)) >= 300:
             out["bulk_start"] = (stat.split("\n", 1)[0].strip(), int(files.group(1)))
@@ -2743,6 +3011,10 @@ def sourcesafe_lines(root, vss, git_h, histories, alerts):
     out, combined = [], None
     found = vss.histories()
     for where in vss.recorded:   # on screen only: a server's name isn't for the report
+        if where in vss.on_network:
+            print(f"SourceSafe database named in the project files (shown here only, not saved in the report): {where}"
+                  f" (on a network share, so not opened; to include it, run this again with --sourcesafe \"{where}\")")
+            continue
         reachable = os.path.isfile(os.path.join(where, "srcsafe.ini"))
         print(f"SourceSafe database named in the project files (shown here only, not saved in the report): {where}"
               + ("" if reachable else " (not reachable from this computer)"))
@@ -2792,6 +3064,11 @@ def sourcesafe_lines(root, vss, git_h, histories, alerts):
                 out.append(f"      Git does hold {plural(len(imported['pre_git']), 'commit')} dated before 2005, so part of"
                            " it may already have been converted into Git.")
         alerts.append("SourceSafe history not included")
+    if vss.on_network:
+        out += ["", "NOTE: The project files name a SourceSafe database on a network share. This script doesn't open",
+                "      network locations by itself, so it wasn't read. To include its history, run this again with",
+                "      --sourcesafe \"<that network folder>\" added (the folder was shown on screen, not in this",
+                "      report)."]
     return out, combined
 
 
@@ -3000,25 +3277,38 @@ def sqlcmd_values(out):
     return re.findall(r"\x1d(.*?)\x1e", out or "", re.S)
 
 
+TRUST_SERVER_CERTIFICATE = False   # --trust-server-certificate: sqlcmd's -C, for a server the user trusts
+# What sqlcmd says when it can't verify the server's certificate (newer versions encrypt, and check
+# the certificate, by default; a server's own self-signed one fails that check).
+SQL_CERTIFICATE_ERROR = re.compile(r"certificate|SSL Provider", re.I)
+
+
 def sqlcmd(server, query, database="master"):
-    """sqlcmd's output, or None. Windows sign-in unless SQLCMDUSER / SQLCMDPASSWORD are set."""
+    """(sqlcmd's output or None, whether it failed because the server's certificate couldn't be
+    verified). Windows sign-in unless SQLCMDUSER / SQLCMDPASSWORD are set."""
     exe = tool_path("sqlcmd")
     if exe is None:
         import glob
         exe = next((m for p in SQLCMD_PATHS for m in sorted(glob.glob(p), reverse=True)), None)
     if exe is None:
-        return None
+        return None, False
     auth = [] if os.environ.get("SQLCMDUSER") else ["-E"]
-    base = [exe, "-S", server, "-d", database, *auth, "-y", "0", "-f", "65001", "-b", "-Q", query]   # -y 0: no width limit
-    for extra in (["-C"], []):   # -C: trust the server's certificate (newer sqlcmd insists on encryption)
-        try:
-            out = subprocess.run(base[:1] + extra + base[1:], capture_output=True, timeout=600, env=quiet_env(),
-                                 stdin=subprocess.DEVNULL)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if out.returncode == 0:
-            return out.stdout.decode("utf-8", "replace")
-    return None
+    trust = ["-C"] if TRUST_SERVER_CERTIFICATE else []
+    # -y 0: no width limit
+    args = [exe, "-S", server, "-d", database, *auth, *trust, "-y", "0", "-f", "65001", "-b", "-Q", query]
+    try:
+        out = subprocess.run(args, capture_output=True, timeout=600, env=quiet_env(), stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None, False
+    if out.returncode == 0:
+        return out.stdout.decode("utf-8", "replace"), False
+    said = (out.stdout + out.stderr).decode("utf-8", "replace")
+    return None, bool(SQL_CERTIFICATE_ERROR.search(said))
+
+
+CERTIFICATE_REFUSED = ("couldn't connect: the server's certificate couldn't be verified, so sqlcmd didn't trust it"
+                       " (usual for a server with its own self-signed certificate). If this is a server you trust, run"
+                       " this again with --trust-server-certificate added")
 
 
 def read_sql_server(server, databases=()):
@@ -3026,16 +3316,19 @@ def read_sql_server(server, databases=()):
     found = {"databases": 0, "objects": Counter(), "code": [], "tables": 0}
     names = list(databases)
     if not names:
-        out = sqlcmd(server, SQL_SERVER_DATABASES)
+        out, certificate = sqlcmd(server, SQL_SERVER_DATABASES)
         if out is None:
-            found["error"] = ("couldn't connect (is sqlcmd installed? may this Windows account sign in? or set"
-                              " SQLCMDUSER and SQLCMDPASSWORD)")
+            found["error"] = CERTIFICATE_REFUSED if certificate else (
+                "couldn't connect (is sqlcmd installed? may this Windows account sign in? or set SQLCMDUSER and"
+                " SQLCMDPASSWORD)")
             return found
         names = [n.strip() for n in sqlcmd_values(out) if n.strip()]
     for db in names:
         progress(f"Reading the code in SQL Server database {db} ...")
-        out = sqlcmd(server, SQL_SERVER_MODULES, db)
+        out, certificate = sqlcmd(server, SQL_SERVER_MODULES, db)
         if out is None:
+            if certificate:
+                found["error"] = CERTIFICATE_REFUSED
             continue
         found["databases"] += 1
         for record in sqlcmd_values(out):
@@ -3045,10 +3338,12 @@ def read_sql_server(server, databases=()):
                 if kind:
                     found["objects"][kind] += 1
                     found["code"].append((kind, f"{db.lower()}.{fields[1].strip().lower()}", fields[2]))
-        tables = (sqlcmd_values(sqlcmd(server, SQL_SERVER_TABLES, db)) or ["0"])[0].strip()
+        tables = (sqlcmd_values(sqlcmd(server, SQL_SERVER_TABLES, db)[0]) or ["0"])[0].strip()
         found["tables"] += int(tables) if tables.isdigit() else 0
     progress()
-    if not found["databases"] and "error" not in found:
+    if found["databases"]:
+        found.pop("error", None)
+    elif "error" not in found:
         found["error"] = "couldn't read any database"
     return found
 
@@ -3154,15 +3449,18 @@ def access_format(path):
 # Reading an Access database: on Windows, through Microsoft Access itself (everything, VBA
 # included); elsewhere through mdbtools, if installed (everything but the VBA). Always on a
 # temporary copy, with Access's macros and code switched off, so nothing in the file runs and
-# the original is never touched.
+# the original is never touched. If Access won't confirm that they're off, the database isn't
+# opened at all.
 ACCESS_POWERSHELL = r"""
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 $out = @{}
 try { $app = New-Object -ComObject Access.Application } catch { '{"error":"Microsoft Access is not installed"}'; exit }
+$secure = $false
 try {
   $app.Visible = $false
-  try { $app.AutomationSecurity = 3 } catch {}
+  try { $app.AutomationSecurity = 3; $secure = ($app.AutomationSecurity -eq 3) } catch {}
+  if (-not $secure) { $out.macros_on = $true; throw 'Access could not switch off its macros' }
   $app.OpenCurrentDatabase($args[0], $false)
   $p = $app.CurrentProject
   $out.forms = $p.AllForms.Count; $out.reports = $p.AllReports.Count
@@ -3179,7 +3477,7 @@ try {
   } catch { $out.vba_error = $_.Exception.Message }
 } catch { $out.error = $_.Exception.Message }
 finally {
-  try { $app.CloseCurrentDatabase() } catch {}
+  if ($secure) { try { $app.CloseCurrentDatabase() } catch {} }
   try { $app.Quit() } catch {}
   try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) } catch {}
 }
@@ -3190,17 +3488,22 @@ $out | ConvertTo-Json -Depth 5 -Compress
 def read_access_database(path):
     """{"how", "forms", "reports", "macros", "modules", "tables", "odbc", "queries": [(name, sql)],
     "vba": [code], "error"} for an Access database, read as fully as this computer allows."""
-    import tempfile
     found = {"how": None, "queries": [], "vba": []}
-    if os.name == "nt":
+    if os.name == "nt" and OFFLINE:
+        # A database opened in Access can connect to the tables it links to (on a server, or in another
+        # database on a network share), by its startup form, say.
+        left_out_offline("Access databases' forms, reports and VBA: Microsoft Access, which reads them, could connect to"
+                         " the tables a database links to on other computers")
+        found["offline"] = True
+    elif os.name == "nt":
         # Access may write to a database it opens, so it gets a copy, deleted straight after.
-        work = tempfile.mkdtemp(prefix="size_codebase_")
+        work = temp_folder("access")
         try:
             copy = os.path.join(work, os.path.basename(path))
             shutil.copyfile(path, copy)
             found.update(read_access_with_access(copy, work))
         except OSError as e:
-            found["error"] = str(e)
+            found["error"] = scrub(e)
         finally:
             shutil.rmtree(work, ignore_errors=True)
     if found["how"] is None and tool_path("mdb-tables"):
@@ -3218,15 +3521,17 @@ def read_access_with_access(copy, work):
         got = json.loads(out or "")
     except ValueError:
         return {}
+    if isinstance(got, dict) and got.get("macros_on"):
+        return {"macros_on": True}
     if not isinstance(got, dict) or got.get("error") and "forms" not in got:
-        return {"error": got.get("error") if isinstance(got, dict) else None}
+        return {"error": scrub(got["error"]) if isinstance(got, dict) and got.get("error") else None}
     as_list = lambda v: v if isinstance(v, list) else ([v] if v else [])   # ConvertTo-Json unwraps 1-item lists
     return {"how": "Microsoft Access", "forms": got.get("forms", 0), "reports": got.get("reports", 0),
             "macros": got.get("macros", 0), "modules": got.get("modules", 0), "tables": got.get("tables", 0),
             "odbc": got.get("odbc", 0),
             "queries": [(q.get("name", ""), q.get("sql") or "") for q in as_list(got.get("queries")) if isinstance(q, dict)],
             "vba": [c.get("code") or "" for c in as_list(got.get("vba")) if isinstance(c, dict)],
-            "vba_error": got.get("vba_error")}
+            "vba_error": scrub(got["vba_error"]) if got.get("vba_error") else None}
 
 
 def read_access_with_mdbtools(path):
@@ -3425,6 +3730,12 @@ class DatabaseCode:
                 out.append("    (its code is counted from the copy exported as text, below, so not twice)")
             if got.get("how") == "mdbtools":
                 out.append("    (read with mdbtools: VBA can only be read by Microsoft Access, on Windows)")
+            elif got.get("macros_on"):
+                out.append("    (not opened: Microsoft Access couldn't switch off the database's macros and code, so it"
+                           " wasn't opened, to be safe)")
+            elif got.get("offline"):
+                out.append("    (not opened with Microsoft Access, because of --offline: opening it could connect to the"
+                           " tables it links to on other computers)")
             elif got.get("how") is None:
                 out.append("    (not opened: run this on Windows with Microsoft Access installed to count its forms,"
                            " reports, queries and VBA)")
@@ -3618,8 +3929,11 @@ def dependency_name(path):
     """The library a path outside the project points to, e.g. ".../boost_1_55_0/stage/lib" ->
     "boost 1.55.0". None if the path says nothing (or only someone's personal folders)."""
     variables = re.findall(r"\$\((\w+)\)|\$\{(\w+)\}|%(\w+)%", path)
+    on_share = path.strip().startswith(("\\\\", "//"))
     path = re.sub(r"\$\([^)]*\)|\$\{[^}]*\}|%[^%]+%|\$\w+", "", path).replace("\\", "/")
     parts = [p for p in path.split("/") if p.strip()]
+    if on_share:   # \\server\share\...: a computer's name isn't for the report
+        parts = parts[2:]
     if not any(p.strip().lower() not in PATH_NOISE for p in parts):
         # Only a variable: its name may say which library, e.g. $(DXSDK_DIR) or %BOOST_ROOT%.
         for var in (v for group in variables for v in group if v):
@@ -3794,7 +4108,9 @@ class Dependencies:
                 continue
             clean = re.sub(r"\$\([^)]*\)|\$\{[^}]*\}|%[^%]+%", "", value).strip()
             local = os.path.normpath(os.path.join(here, clean)) if clean and not os.path.isabs(clean) else None
-            if clean in ("", ".", "./") or (local and os.path.exists(local) and is_within(local, self.root)):
+            # Only paths inside the project are looked for: a build file can name any folder, even
+            # one on another computer.
+            if clean in ("", ".", "./") or (local and is_within(local, self.root) and os.path.exists(local)):
                 continue   # inside the project
             dep = dependency_name(value)
             if dep:
@@ -3977,8 +4293,10 @@ def public_repositories(root):
     found = []
     for _, url in git_remotes(root):
         m = re.search(r"(github\.com|gitlab\.com|bitbucket\.org)[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", url)
-        if m and run(["git", "-c", "credential.helper=", "ls-remote", "--exit-code",
-                      f"https://{m.group(1)}/{m.group(2)}/{m.group(3)}.git", "HEAD"], root, 30) is not None:
+        if m and OFFLINE:
+            left_out_offline("whether anyone can read the repository (asked of GitHub, GitLab or Bitbucket)")
+        elif m and ls_remote(root, f"https://{m.group(1)}/{m.group(2)}/{m.group(3)}.git", "HEAD", options=["--exit-code"],
+                             login=False, timeout=30) is not None:
             found.append(f"{m.group(1)}/{m.group(2)}/{m.group(3)}")
     return found
 
@@ -3989,13 +4307,6 @@ def git_tracked_files(root):
         return None
     out = run(["git", "ls-files", "-z"], root, 600)
     return None if out is None else {os.path.normcase(p.replace("/", os.sep)) for p in out.split("\0") if p}
-
-
-def git_ignored(root):
-    """The files and folders Git is told to ignore (build output, local settings ...), relative to
-    root (normcase): empty outside a Git repository."""
-    out = run(["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"], root, 600)
-    return {os.path.normcase(p.rstrip("/").replace("/", os.sep)) for p in (out or "").split("\0") if p}
 
 
 def submodules(repo_dir):
@@ -4077,19 +4388,32 @@ def folder_breakdown(lines_by_dir):
 # Standard measures: the numbers buyers' codebase forms ask for, as the tools those forms name
 # define them. scc counts logical lines (not blank, not only a comment) and, with --gen, generated
 # code; jscpd measures duplication (code copied and pasted, at least 5 lines and 50 tokens long).
-# Both are counted here without them, over the studio's own code. If they happen to be installed,
-# they're also run the way the forms ask, over the whole folder.
+# Both are run the way the forms ask, over the studio's own code. Where one can't be run, its
+# figures are left out of the report, which says why: this script doesn't estimate them.
 
 # ##############################
-# This script's estimates
+# Primary language
 # ##############################
-# The languages on forms' lists, and the names this script gives some of them.
+# The languages on forms' lists, and the names this script and scc give some of them.
 FORM_LANGUAGES = {"C#", "C", "C++", "CSS", "Go", "HTML", "Java", "JavaScript", "Kotlin", "PHP", "Python", "Ruby",
                   "Rust", "SQL", "Scala", "Shell", "Swift", "TypeScript", "ABAP", "Ada", "Apex", "Assembly", "COBOL",
                   "Delphi", "Erlang", "Fortran", "JCL", "LabVIEW", "MUMPS", "OCaml", "Object Pascal", "PL/I", "Perl",
                   "Progress ABL", "RPG", "Smalltalk", "Tcl", "VHDL", "Verilog", "Visual Basic 6"}
-FORM_LANGUAGE_NAMES = {"UnityScript": "JavaScript", "T-SQL": "SQL", "PL/SQL": "SQL", "Pascal": "Object Pascal"}
-TOKEN = re.compile(rb"\w+|[^\w\s]")
+FORM_LANGUAGE_NAMES = {"UnityScript": "JavaScript", "T-SQL": "SQL", "PL/SQL": "SQL", "Pascal": "Object Pascal",
+                       # scc's names
+                       "C Header": "C header", "C++ Header": "C++", "BASH": "Shell", "Zsh": "Shell", "Korn Shell": "Shell",
+                       "C Shell": "Shell", "Fish": "Shell", "FORTRAN Legacy": "Fortran", "Fortran Modern": "Fortran",
+                       "SystemVerilog": "Verilog", "JSX": "JavaScript", "TypeScript Typings": "TypeScript", "TCL": "Tcl",
+                       "Objective C": "Objective-C", "Objective C++": "Objective-C", "Unreal Script": "UnrealScript",
+                       "Powershell": "PowerShell", "Cuda": "CUDA"}
+# What scc counts that isn't code (settings, data, documents, project files): never the primary language.
+SCC_NOT_CODE = {"JSON", "JSONC", "JSON5", "JSONL", "XML", "YAML", "TOML", "INI", "CSV", "Markdown", "Plain Text",
+                "License", "ReStructuredText", "AsciiDoc", "Org", "Rich Text Format", "LaTeX", "TeX", "Textile",
+                "Creole", "SVG", "MSBuild", "Properties File", "gitignore", "ignore", "Docker ignore", "Patch",
+                "Jupyter", "Godot Scene", "Game Maker Project", "XML Schema", "Document Type Definition", "XAML",
+                "Qt Translation Source", "Report Definition Language", "Xcode Config", "nuspec", "Module-Definition",
+                "SPDX", "TaskPaper", "HEX", "Intel HEX", "CloudFormation (JSON)", "CloudFormation (YAML)",
+                "Bitbucket Pipeline", "Systemd", "Windows Resource-Definition Script"}
 
 
 def form_language(lang, ext=""):
@@ -4100,88 +4424,17 @@ def form_language(lang, ext=""):
     return FORM_LANGUAGE_NAMES.get(lang, lang)
 
 
-class StandardMeasures:
-    """Logical lines, generated lines and copied lines of the studio's own code, file by file."""
-    WINDOW, MIN_TOKENS = 5, 50   # jscpd's --min-lines and --min-tokens, as forms set them
-    BLOOM_BITS = 1 << 28         # the runs of lines seen so far, in a Bloom filter: 32 MB however big the code
-
-    def __init__(self):
-        self.logical = self.generated = self.copied = self.ignored = 0
-        self.languages = Counter()         # logical lines, by language as forms name them
-        self.non_blank = Counter()         # non-blank lines seen, by this script's language name
-        self.seen = bytearray(self.BLOOM_BITS >> 3)
-
-    # ####################
-    # Counting files
-    # ####################
-
-    def add(self, code, lines, lang, ext, generated):
-        """code: a file's logical lines (see code_lines); lines: its non-blank lines as counted in
-        the report, which can leave some out (the data in SQL scripts, a VB form's layout)."""
-        logical = min(len(code), lines)
-        self.logical += logical
-        self.generated += logical if generated else 0
-        self.languages[form_language(lang, ext)] += logical
-        self.non_blank[lang] += lines
-        self.copied += min(self.copied_lines(code), logical)
-
-    def skip(self, lines, lang):
-        """A file left out, as scc leaves it out: Git ignores it (build output, say)."""
-        self.ignored += lines
-        self.non_blank[lang] += lines
-
-    def add_uncounted(self, lines_by_lang):
-        """Code counted in the report that wasn't read here file by file (code inside databases),
-        as its non-blank lines."""
-        extra = 0
-        for lang, n in lines_by_lang.items():
-            more = n - self.non_blank[lang]
-            if more > 0:
-                self.logical += more
-                self.languages[form_language(lang)] += more
-                extra += more
-        return extra
-
-    # ####################
-    # Copied code
-    # ####################
-
-    def copied_lines(self, code):
-        """How many of a file's logical lines repeat code seen before, in it or in an earlier file:
-        runs of at least WINDOW lines and MIN_TOKENS tokens. As jscpd counts, the first copy is
-        original and each later one is copied. Lines are compared without their spacing."""
-        n, w = len(code), self.WINDOW
-        if n < w:
-            return 0
-        keys = [hash(b" ".join(line.split())) for line in code]
-        copied = bytearray(n)
-        seen, mask = self.seen, self.BLOOM_BITS - 1
-        for i in range(n - w + 1):
-            h = hash(tuple(keys[i:i + w])) & 0xFFFFFFFFFFFFFFFF
-            a, b, c = h & mask, (h >> 28) & mask, ((h >> 36) ^ (h * 0x9E3779B1)) & mask
-            if seen[a >> 3] >> (a & 7) & 1 and seen[b >> 3] >> (b & 7) & 1 and seen[c >> 3] >> (c & 7) & 1:
-                copied[i:i + w] = b"\1" * w
-            else:
-                seen[a >> 3] |= 1 << (a & 7)
-                seen[b >> 3] |= 1 << (b & 7)
-                seen[c >> 3] |= 1 << (c & 7)
-        return sum(m.end() - m.start() for m in re.finditer(rb"\x01+", bytes(copied))
-                   if len(TOKEN.findall(b" ".join(code[m.start():m.end()]))) >= self.MIN_TOKENS)
-
-    # ####################
-    # Primary language
-    # ####################
-
-    def primary_language(self):
-        """(the language with the most logical lines as forms name it, or "Other", its own name)."""
-        langs = Counter(self.languages)
-        headers = langs.pop("C header", 0)
-        if headers:
-            langs["C" if langs["C"] > langs["C++"] else "C++"] += headers
-        top = next((lang for lang, n in langs.most_common(1) if n), None)
-        if top is None:
-            return None, None
-        return (top if top in FORM_LANGUAGES else "Other"), top
+def primary_language(lines_by_language):
+    """(the language with the most lines, as forms name it, or "Other"; its own name) from {language
+    as forms name it: lines}. C headers go with C or C++, whichever has more."""
+    langs = Counter(lines_by_language)
+    headers = langs.pop("C header", 0)
+    if headers:
+        langs["C" if langs["C"] > langs["C++"] else "C++"] += headers
+    top = next((lang for lang, n in langs.most_common(1) if n > 0), None)
+    if top is None:
+        return None, None
+    return (top if top in FORM_LANGUAGES else "Other"), top
 
 
 # ##############################
@@ -4203,49 +4456,68 @@ JSCPD_IGNORE = ["**/*.csv"]   # forms' --ignore; given in a config file, beside 
 # ####################
 # scc and jscpd, the tools buyers' forms name, at pinned versions: fetched once from their official
 # releases (GitHub for scc; npmjs.org for jscpd, published there as a self-contained program, so
-# Node.js isn't needed) and checked against these SHA-256 checksums before they're run. Nothing is
-# sent anywhere. They're kept in tools_folder(); deleting it removes them.
+# Node.js isn't needed), over HTTPS with the certificate checked. The download is checked against
+# its SHA-256 checksum below, and so is the program taken out of it, before it's kept, and again
+# before every run. Nothing is sent anywhere. They're kept in tools_folder(); deleting it removes
+# them. No other copy of scc or jscpd (one installed on this computer, say) is ever run.
 SCC_URL = "https://github.com/boyter/scc/releases/download/v4.1.0/scc_"
 JSCPD_URL = "https://registry.npmjs.org/jscpd-{0}/-/jscpd-{0}-5.4.1.tgz"
-PINNED_TOOLS = {   # tool: (version, the program's place in the download, {(system, cpu[, C library]): (url, sha256)})
+PINNED_TOOLS = {   # tool: (version, the program's place in the download,
+    #                       {(system, cpu[, C library]): (url, the download's sha256, the program's sha256)})
     "scc": ("4.1.0", "", {
         ("Darwin", "arm64"): (SCC_URL + "Darwin_arm64.tar.gz",
-                              "7201c7aa4aace058d43308462cba72adb18f6094c08c0741727455976d0a0747"),
+                              "7201c7aa4aace058d43308462cba72adb18f6094c08c0741727455976d0a0747",
+                              "84967748ef1cff481867adff389d0ec138542d30508f1b3aa1186e2bf83de9f0"),
         ("Darwin", "x64"): (SCC_URL + "Darwin_x86_64.tar.gz",
-                            "7f705031228add7e55edded409179a60de6b538d41f153ba2922dee95adda50d"),
+                            "7f705031228add7e55edded409179a60de6b538d41f153ba2922dee95adda50d",
+                            "181240384c83fa8055d5676e58a96885846aa3b6757dcebb1d55ee60fe952bd8"),
         ("Linux", "arm64"): (SCC_URL + "Linux_arm64.tar.gz",
-                             "6e0d2a1f8d3540ba7df185477dec40bb7340f1b214bfd303147de5cad2bd7b8b"),
+                             "6e0d2a1f8d3540ba7df185477dec40bb7340f1b214bfd303147de5cad2bd7b8b",
+                             "5751b4f79502ec0fa40e2205347c79c19680fe4cbf4dd31f7daef7bcd4475af7"),
         ("Linux", "x64"): (SCC_URL + "Linux_x86_64.tar.gz",
-                           "c7328436d3027f4357d3d7853f7dc3ac2bbcb4ca08f1adad91a27c593884079b"),
+                           "c7328436d3027f4357d3d7853f7dc3ac2bbcb4ca08f1adad91a27c593884079b",
+                           "4763d7437218d2d642e2f2a4f7f078e044aa67e0e15b90bab6c70d5fc0ab4022"),
         ("Linux", "x86"): (SCC_URL + "Linux_i386.tar.gz",
-                           "cddeda90ec848c614c6c390eae8b638f94d88e9450e00bf2ba5f420f83b66de1"),
+                           "cddeda90ec848c614c6c390eae8b638f94d88e9450e00bf2ba5f420f83b66de1",
+                           "5c0bce19affaa9ddcce385ad10d74966f133554fe43a4ed0f045d09cde711387"),
         ("Windows", "arm64"): (SCC_URL + "Windows_arm64.zip",
-                               "fdc1188bec07ab46fd391686c404abcd0bed92fffb5f1bb03aa9050dd7bc7f15"),
+                               "fdc1188bec07ab46fd391686c404abcd0bed92fffb5f1bb03aa9050dd7bc7f15",
+                               "f001ba25f8121b30eef0f6d51eb35c44fbfb922ceebed4376b326db78ef3bc68"),
         ("Windows", "x64"): (SCC_URL + "Windows_x86_64.zip",
-                             "4a433984f45ff29c94eeb3af6db5b511c58f5bf74063dccedafcbf473cb8ff31"),
+                             "4a433984f45ff29c94eeb3af6db5b511c58f5bf74063dccedafcbf473cb8ff31",
+                             "b22c38e5bd888d98cdc3987cd125b0041fa1154ed4ef59238052d156461324e8"),
         ("Windows", "x86"): (SCC_URL + "Windows_i386.zip",
-                             "7b5b924e85b6fe7f1ba56f15e7e27220a2c0c7089f815368e61f24c6ef317688"),
+                             "7b5b924e85b6fe7f1ba56f15e7e27220a2c0c7089f815368e61f24c6ef317688",
+                             "54bbb39702484f960ae051c5bb6cf927ec1dd2dd17b485a95269df38152abecd"),
     }),
     "jscpd": ("5.4.1", "package/bin/", {
         ("Darwin", "arm64"): (JSCPD_URL.format("darwin-arm64"),
-                              "cafdb84c9345d0790e4a2297789cfeb16ac939442f322c49a54961468c895aff"),
+                              "cafdb84c9345d0790e4a2297789cfeb16ac939442f322c49a54961468c895aff",
+                              "aaa9cd3cef9d1e1e7280e0f4f551b50de533d62f2ec7effb19a99bd6b58d3f7a"),
         ("Darwin", "x64"): (JSCPD_URL.format("darwin-x64"),
-                            "43dd411716d0a90803d2ad3d3cd74da96523fc31f13f202c6c6e77b0b4841beb"),
+                            "43dd411716d0a90803d2ad3d3cd74da96523fc31f13f202c6c6e77b0b4841beb",
+                            "da19d3a2de025f52e00550fc2437eb955ccfdc9aa4b3b2c24e7e1e77f86e5c06"),
         ("Linux", "arm64", "gnu"): (JSCPD_URL.format("linux-arm64-gnu"),
-                                    "74cbf9d3faa5240d2a17f03a6829fb67cc04f7a37059b3a6f57e9d3adb438b94"),
+                                    "74cbf9d3faa5240d2a17f03a6829fb67cc04f7a37059b3a6f57e9d3adb438b94",
+                                    "ea943633332cbf9f14e966f4aa12964a4dfb27e74de7040df0e4303d13afb29f"),
         ("Linux", "arm64", "musl"): (JSCPD_URL.format("linux-arm64-musl"),
-                                     "e81c41fa6fa70788c8e47f4eff0ee3d5f00dd8b8cf0489ac7f610105798e4847"),
+                                     "e81c41fa6fa70788c8e47f4eff0ee3d5f00dd8b8cf0489ac7f610105798e4847",
+                                     "7227178e87816b8ad54ddb7df084db4c9487ebb34848ead2635b0da162232619"),
         ("Linux", "x64", "gnu"): (JSCPD_URL.format("linux-x64-gnu"),
-                                  "5cfd74b986e3d9205dd639a84249203595be67f6062ac652f1b78884b1dea439"),
+                                  "5cfd74b986e3d9205dd639a84249203595be67f6062ac652f1b78884b1dea439",
+                                  "9656bc09c9a537006735356798c2f4b78299f81e0d57431e7843b88622e74372"),
         ("Linux", "x64", "musl"): (JSCPD_URL.format("linux-x64-musl"),
-                                   "28f47a136fc81577ecb67db247b4575abd17941a5682bb57caf7ca967911dc73"),
+                                   "28f47a136fc81577ecb67db247b4575abd17941a5682bb57caf7ca967911dc73",
+                                   "a2217c30cf91205ccabf7ed42509fcebcac44c2fc1d6c43fe4ef82ecf63c8f7c"),
         ("Windows", "arm64"): (JSCPD_URL.format("windows-arm64-msvc"),
-                               "4250180ae1129b22ed6d3e3be7c60c18678fae78d36b2cc65c67d04b0406dad9"),
+                               "4250180ae1129b22ed6d3e3be7c60c18678fae78d36b2cc65c67d04b0406dad9",
+                               "02a68936be7fc3b689318dce55e7120d13e13821375871fd5f5607e91b88bd77"),
         ("Windows", "x64"): (JSCPD_URL.format("windows-x64-msvc"),
-                             "657b833dbe8c642984d859bafc9557827ea11808bed76fa23bed63fe6d3da3a0"),
+                             "657b833dbe8c642984d859bafc9557827ea11808bed76fa23bed63fe6d3da3a0",
+                             "d6a514877c1e5c4ac647f4d2f0cb2321b0170d9b5eb088104e809b64020023a9"),
     }),
 }
-FETCH_TOOLS = True          # --no-download: use only an scc or jscpd that's already installed
+FETCH_TOOLS = True          # --no-download: don't download scc or jscpd (copies downloaded before are still used)
 KEEP_TOOL_REPORTS = False   # --reports: save scc's and jscpd's own reports beside this one
 
 
@@ -4259,6 +4531,14 @@ def this_computer():
     return system, cpu, libc
 
 
+def pinned_build(name):
+    """(url, the download's sha256, the program's sha256) of scc's or jscpd's build for this
+    computer, or None if there's none."""
+    system, cpu, libc = this_computer()
+    builds = PINNED_TOOLS[name][2]
+    return builds.get((system, cpu, libc)) or builds.get((system, cpu))
+
+
 def tools_folder():
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
@@ -4270,18 +4550,10 @@ def tools_folder():
 
 
 def download(url):
-    import ssl
-    import urllib.error
+    """The file at url, over HTTPS with the server's certificate checked as Python always does.
+    Raises an exception if it can't be had."""
     import urllib.request
-    try:
-        with urllib.request.urlopen(url, timeout=300) as response:
-            return response.read()
-    except urllib.error.URLError as e:
-        if not isinstance(e.reason, ssl.SSLError):
-            raise
-    # Python from python.org on macOS has no certificates until its "Install Certificates" is run.
-    # The pinned checksum is what vouches for the file, so fetch it without checking the certificate.
-    with urllib.request.urlopen(url, timeout=300, context=ssl._create_unverified_context()) as response:
+    with urllib.request.urlopen(url, timeout=300) as response:
         return response.read()
 
 
@@ -4301,64 +4573,83 @@ def archive_member(data, name):
 
 
 def find_tool(name):
-    """(path, version) of scc or jscpd: the pinned version, fetched if need be, or else a copy that's
-    already installed. (None, why not) if neither."""
+    """(path, version) of the pinned build of scc or jscpd, downloaded if need be (and allowed), or
+    (None, why it can't be used). A copy kept from before is checked against the program's checksum
+    each time: one that doesn't match is deleted, and downloaded again if allowed."""
     import hashlib
-    version, inside, builds = PINNED_TOOLS[name]
-    system, cpu, libc = this_computer()
-    exe = name + (".exe" if system == "Windows" else "")
+    version, inside, _ = PINNED_TOOLS[name]
+    build = pinned_build(name)
+    if build is None:
+        system, cpu, _ = this_computer()
+        return None, f"{name} has no build for this computer ({system}, {cpu})"
+    url, download_sha256, program_sha256 = build
+    exe = name + (".exe" if this_computer()[0] == "Windows" else "")
     target = os.path.join(tools_folder(), f"{name}-{version}", exe)
-    if os.path.isfile(target):
-        return target, version
 
     # ####################
-    # Fetching it
+    # A copy kept from before
     # ####################
-    build = builds.get((system, cpu, libc)) or builds.get((system, cpu))
-    if not FETCH_TOOLS:
-        why = f"{name} isn't installed, and fetching it was turned off (--no-download)"
-    elif build is None:
-        why = f"{name} has no build for this computer ({system}, {cpu})"
-    else:
-        url, sha256 = build
-        try:
-            progress(f"Fetching {name} {version} (once) from {url.split('/')[2]} ...")
-            data = download(url)
-            if hashlib.sha256(data).hexdigest() != sha256:
-                raise ValueError("the download doesn't match its checksum, so it wasn't used")
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with open(target + ".part", "wb") as f:
-                f.write(archive_member(data, inside + exe))
-            os.chmod(target + ".part", 0o755)
-            os.replace(target + ".part", target)
+    replaced = ""
+    if os.path.lexists(target):
+        if not os.path.islink(target) and file_sha256(target) == program_sha256:
             return target, version
-        except Exception as e:   # offline, a proxy, a full disk ...: fall back to an installed copy
-            why = f"{name} couldn't be fetched ({type(e).__name__}: {e})"
-        finally:
-            progress()
+        try:
+            os.remove(target)
+        except OSError:
+            return None, f"the copy of {name} kept on this computer isn't the pinned build, and it couldn't be deleted"
+        replaced = f"the copy of {name} kept on this computer wasn't the pinned build, so it was deleted; "
 
     # ####################
-    # Else, a copy that's already installed
+    # Downloading it
     # ####################
-    installed = tool_path(name)
-    return (installed, "installed") if installed else (None, why)
+    if OFFLINE:
+        left_out_offline(f"downloading {name}, which measures some of the standard measures")
+        return None, replaced + f"{name} wasn't downloaded, because of --offline"
+    if not FETCH_TOOLS:
+        return None, replaced + f"{name} isn't downloaded yet, and downloading it was turned off (--no-download)"
+    try:
+        progress(f"Downloading {name} {version} (once) from {url.split('/')[2]} ...")
+        data = download(url)
+        if hashlib.sha256(data).hexdigest() != download_sha256:
+            raise ValueError("the download doesn't match its checksum, so it wasn't used")
+        program = archive_member(data, inside + exe)
+        if hashlib.sha256(program).hexdigest() != program_sha256:
+            raise ValueError("the program in the download doesn't match its checksum, so it wasn't used")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target + ".part", "wb") as f:
+            f.write(program)
+        os.chmod(target + ".part", 0o755)
+        os.replace(target + ".part", target)
+    except Exception as e:   # offline, a proxy, a certificate that can't be checked, a full disk ...
+        why = scrub(getattr(e, "reason", None) or e) or type(e).__name__
+        return None, replaced + f"{name} couldn't be downloaded ({why})"
+    finally:
+        progress()
+    return target, version
 
 
 # ####################
 # Running them
 # ####################
 
+def run_tool(name, path, args, cwd, timeout=900):
+    """Runs scc or jscpd (path from find_tool), after checking once more that it's the pinned build."""
+    build = pinned_build(name)
+    if build is None or os.path.islink(path) or file_sha256(path) != build[2]:
+        return None
+    return run([path, *args], cwd, timeout)
+
+
 def extra_code_args():
     """(scc's, jscpd's) options for the languages named with --code-ext."""
     scc, formats = [], defaultdict(list)
     for ext, (name, like) in sorted(EXTRA_CODE.items()):
-        _, scc_like, jscpd_like = LIKE_LANGUAGES[like]
+        scc_like, jscpd_like = LIKE_LANGUAGES[like]
         for variant in sorted({ext, ext.upper()}):
             scc += ["--count-as-pattern", f"*{glob_escape(variant)}:{name}:{scc_like}"]
         formats[jscpd_like] += [ext[1:], ext[1:].upper()]
     jscpd = ["--formats-exts", ";".join(f"{f}:{','.join(exts)}" for f, exts in sorted(formats.items()))] if formats else []
     return scc, jscpd
-
 
 def glob_escape(path):
     return re.sub(r"([*?\[\]{}])", r"[\1]", path)
@@ -4401,10 +4692,9 @@ def left_out_paths(root, transitions, files, kept):
 def tool_measures(root, leave_out):
     """scc's and jscpd's figures, with the options forms give, for the studio's own code: leave_out
     lists the folders ("folder/**") and files that aren't (see left_out_paths). scc counts the whole
-    folder file by file, so the figure for all of it comes too. ({figures}, [why a tool wasn't run],
-    {tool: its own report, if KEEP_TOOL_REPORTS}). jscpd's report holds copies of the code."""
-    import tempfile
-    found, missing, reports = {}, [], {}
+    folder file by file, so the figure for all of it comes too. ({figures}, {tool: why it wasn't
+    run}, {tool: its own report, if KEEP_TOOL_REPORTS}). jscpd's report holds copies of the code."""
+    found, missing, reports = {}, {}, {}
     matching = {os.path.normcase(p[:-3] if p.endswith("/**") else p).replace("\\", "/") for p in leave_out}
     matching |= {"**"} if "**" in leave_out else set()
     scc_extra, jscpd_extra = extra_code_args()
@@ -4414,17 +4704,19 @@ def tool_measures(root, leave_out):
     # ####################
     scc, version = find_tool("scc")
     if scc is None:
-        missing.append(version)
+        missing["scc"] = version
     else:
         progress("Counting lines with scc ...")
         for key, extra in (("logical", []), ("generated", SCC_GENERATED_ARGS)):
             try:
-                langs = json.loads(run([scc, *SCC_ARGS, *scc_extra, *extra, "--by-file", "--format", "json", "."], root)
-                                   or "null")
+                langs = json.loads(run_tool("scc", scc, [*SCC_ARGS, *scc_extra, *extra, "--by-file", "--format", "json",
+                                                        "."], root) or "null")
             except ValueError:
                 langs = None
             if not isinstance(langs, list):
-                missing.append("scc failed")
+                missing["scc"] = "scc ran, but failed"
+                for figure in ("scc_logical_lines", "scc_whole_folder_logical_lines", "scc_logical_lines_by_language"):
+                    found.pop(figure, None)
                 break
             files = [(str(lang.get("Name", "")), f) for lang in langs for f in lang.get("Files") or []]
             own = [(lang, int(f.get("Code", 0))) for lang, f in files
@@ -4435,13 +4727,13 @@ def tool_measures(root, leave_out):
                 by_lang = Counter()
                 for lang, n in own:
                     by_lang[lang] += n
-                found["scc_logical_lines_by_language"] = dict(by_lang.most_common(15))
+                found["scc_logical_lines_by_language"] = dict(by_lang.most_common())
             else:
                 found["scc_generated_lines"] = sum(n for lang, n in own if lang.endswith("(gen)"))
         else:
             found["scc_version"] = version
             if KEEP_TOOL_REPORTS:
-                reports["scc"] = run([scc, *SCC_ARGS, *scc_extra, "--format", "json", "."], root)
+                reports["scc"] = run_tool("scc", scc, [*SCC_ARGS, *scc_extra, "--format", "json", "."], root)
         progress()
 
     # ####################
@@ -4449,16 +4741,16 @@ def tool_measures(root, leave_out):
     # ####################
     jscpd, version = find_tool("jscpd")
     if jscpd is None:
-        missing.append(version)
+        missing["jscpd"] = version
     else:
-        out = tempfile.mkdtemp(prefix="size_codebase_jscpd_")
+        out = temp_folder("jscpd")
         progress("Measuring duplication with jscpd (slow on big projects) ...")
         try:
             config = os.path.join(out, "jscpd.json")
             with open(config, "w", encoding="utf-8") as f:
                 json.dump({"ignore": JSCPD_IGNORE + [glob_escape(p[:-3]) + "/**" if p.endswith("/**") else
                                                      "**" if p == "**" else glob_escape(p) for p in leave_out]}, f)
-            run([jscpd, ".", *JSCPD_ARGS, *jscpd_extra, "--output", out, "--config", config], root, 3600)
+            run_tool("jscpd", jscpd, [".", *JSCPD_ARGS, *jscpd_extra, "--output", out, "--config", config], root, 3600)
             with open(os.path.join(out, "jscpd-report.json"), encoding="utf-8") as f:
                 text = f.read()
             total = json.loads(text)["statistics"]["total"]
@@ -4469,7 +4761,7 @@ def tool_measures(root, leave_out):
             if KEEP_TOOL_REPORTS:
                 reports["jscpd"] = text
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            missing.append("jscpd failed")
+            missing["jscpd"] = "jscpd ran, but failed"
         finally:
             shutil.rmtree(out, ignore_errors=True)
             progress()
@@ -4480,22 +4772,24 @@ def tool_measures(root, leave_out):
 # Report section
 # ##############################
 AI_ERA = "2022"   # changes made before this year were almost certainly written without AI assistants
+TOOL_FIGURES = {"scc": "logical lines of code and generated lines (scc)", "jscpd": "the duplication ratio (jscpd)"}
 
 
-def standard_measures_report(standard, histories, vcs_found, database_lines, tools, missing, left_out):
+def standard_measures_report(histories, vcs_found, tools, missing, left_out, own_languages, database_languages):
     """(report lines, facts) for the standard measures: scc's and jscpd's figures (see tool_measures)
-    where they could be run, else this script's estimates of them (see StandardMeasures)."""
+    where they could be run (missing: {tool: why not}), the commits forms count, and the primary
+    language. own_languages: the apparently original code's non-blank lines by language as forms
+    name them (the tables above); database_languages: the part of them read from databases, which
+    scc can't see."""
 
     # ####################
     # The figures
     # ####################
-    language, raw = standard.primary_language()
     counted = [h for h in histories if h.get("standard_commits") is not None]
     commits = sum(h["standard_commits"] for h in counted)
     dates = [d for h in histories for d in h.get("dates", ())]
     before = sum(1 for d in dates if d < AI_ERA)
     shallow = any("shallow clone" in note for h in histories for note in h.get("notes", ()))
-    estimate = round(standard.copied / standard.logical, 4) if standard.logical else 0.0
     if not histories:
         delivery = "flat snapshot (no version-control history found)"
     elif all(h["vcs"] == "Git" for h in histories):
@@ -4507,25 +4801,39 @@ def standard_measures_report(standard, histories, vcs_found, database_lines, too
                       for h in counted)
     scc = "scc_logical_lines" in tools
     jscpd = "jscpd_duplication_ratio" in tools
-    logical = tools["scc_logical_lines"] if scc else standard.logical
-    generated = tools["scc_generated_lines"] if scc else standard.generated
-    ratio = tools["jscpd_duplication_ratio"] if jscpd else estimate
     measured = " and ".join(f"{t} {tools[t + '_version']}" for t in ("scc", "jscpd") if t + "_version" in tools)
+
+    # Primary language: by scc's logical lines, with the code read from databases (which scc can't
+    # see) as its non-blank lines; without scc, by the non-blank lines in the tables above.
+    database_lines = sum(database_languages.values())
+    if scc:
+        langs = Counter()
+        for lang, n in tools.get("scc_logical_lines_by_language", {}).items():
+            if lang not in SCC_NOT_CODE:
+                langs[form_language(lang)] += n
+        langs.update(database_languages)
+        basis = "scc's logical lines" + (", and the non-blank lines of the code read from databases, which scc can't"
+                                         " see" if database_lines else "")
+    else:
+        langs = own_languages
+        basis = "this script's own line counts above (non-blank lines), as scc wasn't run"
+    language, raw = primary_language(langs)
 
     # ####################
     # Report lines
     # ####################
     out = ["", "Standard measures, as buyers' codebase forms ask for them, of the apparently original code above"
-               + (f"\n(measured with {measured}, with the forms' options):" if measured else ":"),
-           f"  {'Logical lines of code' + (' (scc)' if scc else ' (estimated as scc counts them)'):<56} {logical:>12,}",
-           f"  {'  of which generated' + (' (scc --gen)' if scc else ' (estimated)'):<56} {generated:>12,}",
-           f"  {'Duplication ratio' + (' (jscpd)' if jscpd else ' (estimated as jscpd measures it)'):<56}"
-           f" {ratio:>12.4f}",
-           f"  {'Commits on the main branch, without merges or reverts':<56} "
-           + (f"{commits:>12,}   ({where})" if counted else f"{'none':>12}"),
-           f"  {'Repositories':<56} {max(1, len(histories)):>12,}",
-           f"  {'Primary language':<56} {language or '?':>12}" + (f"   ({raw})" if raw and raw != language else ""),
-           f"  {'History':<56} {delivery}"]
+               + (f"\n(measured with {measured}, with the forms' options):" if measured else ":")]
+    if scc:
+        out += [f"  {'Logical lines of code (scc)':<56} {tools['scc_logical_lines']:>12,}",
+                f"  {'  of which generated (scc --gen)':<56} {tools['scc_generated_lines']:>12,}"]
+    if jscpd:
+        out.append(f"  {'Duplication ratio (jscpd)':<56} {tools['jscpd_duplication_ratio']:>12.4f}")
+    out += [f"  {'Commits on the main branch, without merges or reverts':<56} "
+            + (f"{commits:>12,}   ({where})" if counted else f"{'none':>12}"),
+            f"  {'Repositories':<56} {max(1, len(histories)):>12,}",
+            f"  {'Primary language':<56} {language or '?':>12}" + (f"   ({raw})" if raw and raw != language else ""),
+            f"  {'History':<56} {delivery}"]
     if dates:
         out.append(f"  {'Changes made before ' + AI_ERA + ' (before AI coding assistants)':<56} {before:>12,}"
                    f"   of {len(dates):,} ({100 * before // len(dates)}%)")
@@ -4535,29 +4843,40 @@ def standard_measures_report(standard, histories, vcs_found, database_lines, too
                    " such as libraries, plugins, build output and translations"
                    + (f"; the whole folder has {tools['scc_whole_folder_logical_lines']:,} logical lines)" if scc
                       else ")"))
-    if missing:
-        out.append(f"  (estimated where scc or jscpd couldn't be used: {'; '.join(missing)})")
-    if database_lines and not scc:
-        out.append(f"  (includes {database_lines:,} lines of code read from databases, counted as non-blank lines)")
-    if standard.ignored and not scc:
-        out.append(f"  (leaves out {standard.ignored:,} lines in files Git ignores, such as build output, as scc does)")
+    if language and (not scc or database_lines):
+        out.append(f"  (primary language from {basis})")
     if counted and len(counted) < len(histories):
         out.append(f"  (commits from {len(counted)} of the {len(histories)} histories: the others couldn't be counted)")
 
     # ####################
+    # What's not included, and how to include it
+    # ####################
+    if missing:
+        out += ["", "NOTE: Not included in the standard measures above, as the tool that measures them couldn't be used:"]
+        out += [f"      - {TOOL_FIGURES[tool]}: {why}" for tool, why in missing.items()]
+        whys = " ".join(missing.values())
+        if "download" in whys:
+            out.append("      To include them, run this again on a computer with an internet connection"
+                       + (", without --offline" if OFFLINE else ", without --no-download" if not FETCH_TOOLS else "")
+                       + ": scc and jscpd are downloaded once, then kept.")
+        if "certificate" in whys.lower() and sys.platform == "darwin":
+            out += ["      The download failed because Python couldn't check the server's certificate. With Python from",
+                    "      python.org, open the Python folder in Applications, double-click \"Install Certificates.command\",",
+                    "      then run this again."]
+
+    # ####################
     # Facts, for the machine-readable copy
     # ####################
-    facts = {"logical_lines": logical, "generated_lines": generated, "duplication_ratio": ratio,
+    facts = {"logical_lines": tools["scc_logical_lines"] if scc else None,
+             "generated_lines": tools["scc_generated_lines"] if scc else None,
+             "duplication_ratio": tools["jscpd_duplication_ratio"] if jscpd else None,
              "measured_with": measured or None, "not_measured": missing,
              "commits_main_branch_no_merges_or_reverts": commits if counted else None,
              "commit_branches": where or None, "repositories": max(1, len(histories)),
-             "primary_language": language, "primary_language_detail": raw, "history": delivery,
+             "primary_language": language, "primary_language_detail": raw,
+             "primary_language_from": basis if language else None, "history": delivery,
              "changes_before_" + AI_ERA: [before, len(dates)] if dates else None,
              "left_out": len(left_out) if measured else None,   # how many: their names stay out of reports
-             "estimates": {"logical_lines": standard.logical, "generated_lines": standard.generated,
-                           "duplication_ratio": estimate, "copied_lines": standard.copied,
-                           "logical_lines_by_language": dict(standard.languages.most_common()),
-                           "database_lines": database_lines, "git_ignored_lines": standard.ignored},
              "version_control": vcs_found, **tools}
     return out, facts
 
@@ -4584,13 +4903,14 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     walk_root = long_path(root)
     marked = {os.path.normcase(os.path.abspath(os.path.join(root, p))): c
               for c, paths in (("third-party", third_party), ("own", own)) for p in paths}
+    del _git_other_owners[:], _left_out_offline[:]   # noted afresh for each project
 
     # ####################
     # What the walk collects
     # ####################
     problems = []           # unexpected errors: reported, but the scan carries on
     alerts = []             # what a reader should check, for the summary at the top
-    linked_dirs = lfs_pointers = epic_notice_lines = 0
+    links = lfs_pointers = epic_notice_lines = 0   # links: symbolic links and junctions, not followed
     vendor_notice_lines = Counter()
     licensed_dirs = []      # own folders with their own licence file: pointed out in the report
     store_guids = None      # Unity Asset Store packages downloaded on this computer, once a Unity project is found
@@ -4603,7 +4923,8 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     nested_repos = []       # (rel, path) of repositories inside the scanned folder
     deps = Dependencies(root)
     dbcode = DatabaseCode()
-    standard = StandardMeasures()
+    source_lines = Counter()   # own lines read from source files, by language (the rest came from databases)
+    c_family = Counter()       # own C/C++ lines, as forms name them: "C", "C header", "C++"
     not_own_folders = []    # where the studio's own code gives way to someone else's, or to build output
     unknown_text = defaultdict(lambda: [0, 0])   # text files of unknown kinds among the studio's own: [files, bytes]
     textual = {}            # extension -> whether its files are text
@@ -4619,7 +4940,6 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     named_authors = []      # people named as authors in the comments of the studio's own code
     mtimes = []             # [earliest, latest] modification time of the studio's own code files
     tracked = git_tracked_files(root)
-    ignored = git_ignored(root)
     untracked = [0, 0]      # own code files not committed to Git: [files, lines]
     submodule_marks = {}    # folder -> (category, library) for Git submodules
     submodule_list = []     # (folder, third-party?)
@@ -4762,7 +5082,7 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                                         for f in list_files(os.path.join(full, sub))):
                 continue   # NuGet's downloaded packages
             if is_link(full):
-                linked_dirs += 1
+                links += 1
                 continue
             child, child_library = category, library
             if category in ("own", "test"):
@@ -4806,9 +5126,14 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                 # Every file: size, dependencies, precompiled libraries, data and credentials
                 # ####################
                 path = os.path.join(dirpath, name)
+                if os.path.islink(path):   # not followed, like linked folders
+                    links += 1
+                    continue
                 try:
                     st = os.stat(path)
                 except OSError:
+                    continue
+                if not S_ISREG(st.st_mode):   # a named pipe or device: reading it could wait forever
                     continue
                 total_files += 1
                 if name.lower() in UNITY_BUILD_FILES:
@@ -4970,13 +5295,10 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                 lines_by[c][lang][1] += lines
                 if c in ("third-party", "engine") and category in ("own", "test"):
                     not_own_files.append(rel_file.replace(os.sep, "/"))
-                if c in ("own", "test") or (c == "generated" and category in ("own", "test")):
-                    parts = os.path.normcase(rel_file).split(os.sep)
-                    if ignored and any(os.sep.join(parts[:i]) in ignored for i in range(1, len(parts) + 1)):
-                        standard.skip(lines, lang)
-                    else:
-                        standard.add([] if code.get("data_lines") else code["code"], lines, lang, ext,
-                                     c == "generated")
+                if c in ("own", "test"):
+                    source_lines[lang] += lines
+                    if lang == "C/C++":
+                        c_family[form_language(lang, ext)] += lines
                 if c == "third-party":
                     libraries[library or known or licence or "other"] += lines
                 if c in ("own", "test") and licence == EPIC_NOTICE:
@@ -5017,7 +5339,7 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                         untracked[0] += 1
                         untracked[1] += lines
             except Exception as e:   # an unexpected file shouldn't cost the whole report
-                problem = f"{type(e).__name__}: {e}"
+                problem = describe(e, root)
                 if len(problems) < 5 and problem not in problems:
                     problems.append(problem)
         progress()
@@ -5087,8 +5409,10 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         vcs_found, histories = version_control(root)
     except Exception as e:
         vcs_found, histories = [], []
-        problems.append(f"reading the version-control history: {type(e).__name__}: {e}")
-    out = [f"Project: {only or os.path.basename(root)}"]
+        problems.append(f"reading the version-control history: {describe(e, root)}")
+    out = [f"size_codebase.py {__version__}" + (" (run with --offline: no connections to other computers)"
+                                                 if OFFLINE else ""),
+           f"Project: {only or os.path.basename(root)}"]
     kinds_found = Counter(kind for kind, _, _ in projects)
     if projects:
         out.append("Project types found:")
@@ -5206,10 +5530,12 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         try:
             out += section()
         except Exception as e:   # a report section shouldn't cost the whole report
-            problems.append(f"reporting {what}: {type(e).__name__}: {e}")
+            problems.append(f"reporting {what}: {describe(e, root)}")
     if any(compiled for _, compiled, _ in dbcode.access):
         alerts.append("a compiled Access database (its VBA source is gone)")
-    if any(got.get("how") is None for _, _, got in dbcode.access):
+    if any(got.get("macros_on") for _, _, got in dbcode.access):
+        alerts.append("Access databases not opened (Access couldn't switch off their macros)")
+    elif any(got.get("how") is None and not got.get("offline") for _, _, got in dbcode.access):
         alerts.append("Access databases not opened (needs Windows with Microsoft Access)")
     if dbcode.server_files and not dbcode.live:
         alerts.append("SQL Server database files or backups whose code isn't counted")
@@ -5283,9 +5609,10 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     if lfs_pointers:
         out += ["", f"NOTE: {lfs_pointers:,} Unreal assets are Git LFS placeholders that were never downloaded, so",
                 "      their Blueprints and types couldn't be read. Run \"git lfs pull\" first for a full count."]
-    if linked_dirs:
-        out += ["", f"NOTE: Skipped {plural(linked_dirs, 'linked folder')} (symbolic links or junctions), so nothing is",
-                "      counted twice. If one holds code that lives nowhere else, run this script on it too."]
+    if links:
+        out += ["", f"NOTE: Skipped {plural(links, 'link')} to other folders or files (symbolic links or junctions), so",
+                "      nothing is counted twice and no code outside this folder is read. If one leads to code that",
+                "      lives nowhere else, run this script on that too."]
     if marked:
         out += ["", "Marked by hand: " + ", ".join(
             f"{plural(n, 'path')} as {c} code" for c, n in Counter(marked.values()).items()) + "."]
@@ -5323,7 +5650,7 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         vss_out, combined = sourcesafe_lines(root, vss, git_h, histories, alerts)
         out += vss_out
     except Exception as e:
-        problems.append(f"reading the SourceSafe history: {type(e).__name__}: {e}")
+        problems.append(f"reading the SourceSafe history: {describe(e, root)}")
     if not histories:
         if mtimes and mtimes[1] - mtimes[0] < 86400:
             day = datetime.fromtimestamp(mtimes[0], timezone.utc).strftime("%Y-%m-%d")
@@ -5389,7 +5716,7 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         try:
             out += engine_report(engine)
         except Exception as e:
-            problems.append(f"reading the engine's history: {type(e).__name__}: {e}")
+            problems.append(f"reading the engine's history: {describe(e, root)}")
 
     # ####################
     # Repositories inside the scanned folder
@@ -5407,7 +5734,7 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         try:
             vcs, nested = version_control(path)
         except Exception as e:
-            problems.append(f"reading the history of {rel}: {type(e).__name__}: {e}")
+            problems.append(f"reading the history of {rel}: {describe(e, root)}")
             continue
         out += ["", f"Repository inside this folder: {rel.replace(os.sep, '/')} ({', '.join(vcs) or 'unreadable'})"]
         for h in nested:
@@ -5421,6 +5748,13 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     # ####################
     if histories or any("History (" in line for line in out):
         out += [""] + HISTORY_CAVEATS
+    if _git_other_owners:
+        n = len(_git_other_owners)
+        which = "this repository: it belongs" if n == 1 else f"{n} of these repositories: they belong"
+        out += ["", f"NOTE: Git at first refused to read {which} to another user account on this computer",
+                "      (Git's \"dubious ownership\" check; usual for external drives and copied folders). Read anyway,",
+                "      for this scan only, with the repository's own settings that could start programs switched off.",
+                "      Git's own settings weren't changed."]
     if missing:
         out += ["", "NOTE: This project is built with a custom Unreal Engine that isn't registered on this computer,",
                 "      so the engine's own history and changes aren't included. Run this script on the engine's",
@@ -5431,21 +5765,47 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     # ####################
     standard_facts = None
     try:
-        own_by_lang = Counter()
+        # The apparently original code's lines by language, as forms name them; and the part of
+        # them that wasn't read from source files (but from databases), which scc can't see.
+        own_by_lang, own_languages, database_languages = Counter(), Counter(c_family), Counter()
         for c in ("own", "test"):
             for lang, (_, n) in lines_by[c].items():
                 own_by_lang[lang] += n
-        database_lines = standard.add_uncounted(own_by_lang)
+        for lang, n in own_by_lang.items():
+            if lang != "C/C++":
+                own_languages[form_language(lang)] += n
+            if n > source_lines[lang]:
+                database_languages[form_language(lang)] += n - source_lines[lang]
         kept = [os.path.relpath(p, root).replace(os.sep, "/") for p, c in marked.items() if c == "own"]
         left_out = left_out_paths(root, not_own_folders, not_own_files, kept)
-        tools, missing, tool_reports = ({}, ["not run on a single file"], {}) if only else tool_measures(root, left_out)
-        section, standard_facts = standard_measures_report(standard, histories, vcs_found, database_lines, tools,
-                                                           missing, left_out)
+        if only:
+            tools, not_measured, tool_reports = {}, {t: "not run on a single file" for t in TOOL_FIGURES}, {}
+        else:
+            tools, not_measured, tool_reports = tool_measures(root, left_out)
+        not_measured = {tool: scrub(why, root) for tool, why in not_measured.items()}
+        section, standard_facts = standard_measures_report(histories, vcs_found, tools, not_measured, left_out,
+                                                           own_languages, database_languages)
         out += section
+        if not_measured and not only:
+            alerts.append(" and ".join(TOOL_FIGURES[t].split(" (")[0] for t in not_measured)
+                          + " not included (" + " and ".join(not_measured) + " couldn't be used)")
         if tool_reports and facts is not None:
             facts["tool_reports"] = tool_reports
     except Exception as e:   # a report section shouldn't cost the whole report
-        problems.append(f"reporting the standard measures: {type(e).__name__}: {e}")
+        problems.append(f"reporting the standard measures: {describe(e, root)}")
+
+    # ####################
+    # What --offline left out
+    # ####################
+    if OFFLINE:
+        out += ["", "Run with --offline: this computer connected to no other one (no downloads, no version-control or",
+                "database servers, no network shares besides the folder scanned)."]
+        if _left_out_offline:
+            out.append("Left out because of that:")
+            out += [f"  - {what}" for what in _left_out_offline]
+            alerts.append("run with --offline, so some figures are left out (see near the end)")
+        else:
+            out.append("Nothing was left out because of that.")
 
     # ####################
     # Problems
@@ -5491,13 +5851,15 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         summary.append(f"  History, all systems together: {n:,} changes, {first} to {last} ({how})")
     if alerts:
         summary.append("  Check: " + "; ".join(alerts))
-    out[1:1] = summary + [""]
+    out[2:2] = summary + [""]
 
     # ##############################
     # The numbers, for the machine-readable copy
     # ##############################
     if facts is not None:
         facts.update({
+            "script_version": __version__, "offline": OFFLINE, "left_out_offline": list(_left_out_offline),
+            "git_repositories_of_other_users": len(_git_other_owners),
             "project": os.path.basename(root), "project_types": [[k, r.replace(os.sep, "/"), d] for k, r, d in projects],
             "lines": {c: {lang: {"files": f, "lines": n} for lang, (f, n) in lines_by[c].items()} for c in categories},
             "own_total": own_total, "duplicate_lines": duplicates[1], "untracked_lines": untracked[1],
@@ -5561,19 +5923,26 @@ def save_report(report, name, here, facts=None):
     for folder in (here, os.getcwd(), os.path.expanduser("~")):
         out_path = os.path.join(folder, f"size_report_{name}.txt")
         try:
-            with open(out_path, "w", encoding="utf-8") as f:
-                f.write(report + "\n")
+            write_report_file(out_path, report + "\n")
             if facts is not None:
-                with open(os.path.join(folder, f"size_report_{name}.json"), "w", encoding="utf-8") as f:
-                    json.dump(facts, f, indent=1, default=sorted)
+                write_report_file(os.path.join(folder, f"size_report_{name}.json"),
+                                  json.dumps(facts, indent=1, default=sorted))
             for tool, text in tool_reports.items():
                 if text:
-                    with open(os.path.join(folder, f"size_report_{name}_{tool}.json"), "w", encoding="utf-8") as f:
-                        f.write(text)
+                    write_report_file(os.path.join(folder, f"size_report_{name}_{tool}.json"), text)
             return out_path
         except OSError:
             continue
     return None
+
+
+def write_report_file(path, text):
+    """Writes one of the report's files. A link already in its place (one a project put beside this
+    script, say, pointing at some other file) is removed, not written through."""
+    if os.path.islink(path):
+        os.remove(path)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
 
 
 def scan(root, here, third_party=(), own=(), sql_servers=(), sourcesafe=()):
@@ -5596,6 +5965,16 @@ def scan(root, here, third_party=(), own=(), sql_servers=(), sourcesafe=()):
               "the duplicated code and the names of the files they're in: look it over before sending it.\n")
 
 
+def usage():
+    """The part of this script's description that says how to run it."""
+    return __doc__[__doc__.index("Usage"):].strip()
+
+
+def stop(message):
+    print(message)
+    sys.exit(2)
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):   # never crash printing an unusual folder name
         try:
@@ -5607,18 +5986,29 @@ def main():
     # Options
     # ####################
     here = os.path.dirname(os.path.abspath(__file__))
-    global FETCH_TOOLS, KEEP_TOOL_REPORTS
+    global FETCH_TOOLS, KEEP_TOOL_REPORTS, OFFLINE, TRUST_SERVER_CERTIFICATE
     roots, args = [], sys.argv[1:]
     marks = {"--third-party": [], "--own": [], "--sql-server": [], "--sql-database": [], "--sourcesafe": [],
              "--code-ext": []}
     while args:
         arg = args.pop(0)
-        if arg == "--no-download":
+        if arg in ("-h", "--help"):
+            print(f"size_codebase.py {__version__}\n\n{usage()}")
+            sys.exit(0)
+        elif arg == "--no-download":
             FETCH_TOOLS = False
+        elif arg == "--offline":
+            OFFLINE = True
         elif arg == "--reports":
             KEEP_TOOL_REPORTS = True
-        elif arg in marks and args:
+        elif arg == "--trust-server-certificate":
+            TRUST_SERVER_CERTIFICATE = True
+        elif arg in marks:
+            if not args:
+                stop(f"{arg} needs a value after it. For help: python3 size_codebase.py --help")
             marks[arg].append(args.pop(0))
+        elif arg.startswith("--"):
+            stop(f"Unknown option: {arg}. For help: python3 size_codebase.py --help")
         else:
             roots.append(arg)
     sql_servers = [(server, marks["--sql-database"]) for server in marks["--sql-server"]]
@@ -5626,8 +6016,18 @@ def main():
         try:
             add_code_extension(spec)
         except ValueError as e:
-            print(e)
-            sys.exit(2)
+            stop(str(e))
+
+    # ####################
+    # Options that contradict --offline
+    # ####################
+    if OFFLINE and sql_servers:
+        stop("--sql-server reads a database server over the network, and --offline says not to connect to any other"
+             " computer. Leave out one of the two.")
+    if OFFLINE and any(is_network_path(db) for db in marks["--sourcesafe"]):
+        stop("--sourcesafe names a folder on a network share, and --offline says not to connect to any other"
+             " computer. Leave out one of the two, or name a copy of the database on this computer.")
+    remove_old_temp_folders()
 
     # ####################
     # Folders named on the command line

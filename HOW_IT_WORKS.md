@@ -28,52 +28,19 @@ Contents:
 
 ## 1. Privacy: what it reads, what it reports, what it never does
 
-### What the report contains
+[SECURITY.md](SECURITY.md) has the full details, each tied to the function that does it: every network connection, every program it runs, every file it writes, everything it reads outside the scanned folder, and the protections against a hostile project. In short:
 
-The report is made of counts, and the names of folders, languages, libraries and file kinds. It does not contain:
+- **It only reads the project.** It writes its report, a cache holding scc and jscpd, and temporary folders that it deletes when done.
+- **Nothing is uploaded.** It connects to other computers only to download scc and jscpd once (checked against fixed SHA-256 checksums), and to ask your own version-control servers for history and pull-request counts, with the access you already have; the tools are told not to prompt for passwords. `--offline` turns all of that off (see [section 14](#14-command-line-reference)).
+- **The report holds counts**, and the names of folders, languages, libraries, packages and branches. It never holds source code, author names or email addresses (names are read to *count* people and stay in memory), credentials (only their kind and number of files), or database rows. It names a file only if you give that file on its own or mark it with `--third-party`. Error messages in it have paths replaced by `<project>`, `~` or `<path>`. With `--reports`, jscpd's own report is saved too, and that one holds copies of the duplicated code (see [section 12](#12-standard-measures-scc-jscpd)).
 
-- **Source code.** No line of code is copied into the report. (Exception: with `--reports`, jscpd's own report is saved beside it, and that report holds copies of the duplicated code. See [section 12](#12-standard-measures-scc-jscpd).)
-- **File names**, apart from the exceptions listed below.
-- **Author names or email addresses.** Names are read from version control and from code comments to *count* people. They stay in memory and are never written to the report or the JSON file.
-- **Credentials.** Only the kind of credential found and the number of files is reported (for example "AWS access keys (2 files)"), never the text.
-- **Database rows.** See below.
-
-Things that *can* appear in the report, so you know what to look over before sending it:
-
-- Folder paths relative to the scanned folder (in the per-folder breakdown, the list of project types, folders with their own licence file, repositories found inside the folder).
-- Names of libraries and packages: copied-in library folders, Unity Asset Store package names, packages listed in `package.json`, `requirements.txt`, `.csproj` and similar files, library names taken from build files, folder names of `#include`d headers that are not in the folder, and Git submodule names.
-- File extensions (in the list of text files of unknown kinds).
-- Git remote names (such as `origin`), branch names, and an SVN path relative to the repository root.
-- If the repository can be read by anyone on github.com, gitlab.com or bitbucket.org, its address (`github.com/owner/repo`).
-- When you give it a single file (an Access database, say), that file's name, as the project name.
-- When you mark a single file as third-party with `--third-party`, that file's name, in the list of libraries.
-- A "Problems while scanning" section, if something unexpected went wrong. It shows up to five error messages, and an operating-system error message can include a file path.
+Look the report over before sending it: folder, library, package and branch names are the owner's own words. SECURITY.md lists exactly what can appear in it.
 
 ### Databases: code only, never rows
 
 From Access databases, SQL Server and SQL Server packages, it reads only code (queries, VBA, stored procedures, views, functions, triggers, SSIS statements and scripts, SSRS queries and code) and the list of objects. It never reads a table's rows. The one table-like thing it reads is Access's own catalog of objects (`MSysObjects`), through mdbtools, to count forms, reports, queries, macros and modules. For a `.bacpac` export, which holds every table's rows, only the schema (`model.xml`) and the pre- and post-deployment scripts are opened.
 
-### Network access
-
-Nothing from the codebase is uploaded. The script makes these network requests, and no others:
-
-1. **Your own version-control servers**, read-only, with the access you already have. For each Git remote (except Epic's public Unreal Engine repository) it runs `git ls-remote` to list pull-request refs. SVN, Perforce, Plastic, TFVC and CVS history commands contact their servers as those tools normally do. All of these run non-interactively: if a server wants a password that isn't already stored, the request fails and the report says "couldn't connect" rather than prompting.
-2. **GitHub's API through `gh`**, only if GitHub's command-line tool is installed and logged in, to count merged pull requests for GitHub remotes. The query includes the repository's owner and name.
-3. **A public-access check.** For remotes on github.com, gitlab.com or bitbucket.org it runs `git ls-remote` over HTTPS with credential helpers switched off. This only succeeds if the repository is public, which the report then points out.
-4. **SQL Server**, only if you name one with `--sql-server`.
-5. **Downloads of scc and jscpd**, once, from GitHub releases and registry.npmjs.org, checked against fixed SHA-256 checksums. `--no-download` turns this off.
-
-### What it runs and what it writes
-
-It only reads the project's files. It writes:
-
-- The report files (see [section 13](#13-output)).
-- The cached copies of scc and jscpd, in a cache folder (see [section 12](#12-standard-measures-scc-jscpd)).
-- Temporary folders, deleted straight after use: a copy of an Access database being opened, the small PowerShell script that opens it, and jscpd's configuration and output.
-
-The external programs it may run are: the version-control command-line tools (only commands that read history: `git log`, `git ls-files`, `svn log`, `p4 changes`, `hg log` and so on), `gh`, PowerShell with Microsoft Access (Windows only), mdbtools, `sqlcmd`, and the pinned scc and jscpd. Git is run with `safe.directory=*` so that it will read repositories on drives owned by another user account (external drives, copied folders); this does not change any configuration.
-
-Microsoft Access is only ever given a temporary *copy* of a database, opened with Access's macros and code switched off (`AutomationSecurity` set to "force disable"), so nothing in the file runs and the original is never touched. mdbtools only reads, so it works on the original.
+Microsoft Access is only ever given a temporary *copy* of a database, and only once Access confirms that the database's macros and code are switched off (`AutomationSecurity` set to "force disable"); if it can't, the database isn't opened, and the report says so. mdbtools only reads, so it works on the original.
 
 ---
 
@@ -133,7 +100,7 @@ The type matters because it changes how the folder is read: which folders are bu
 
 These folders are never entered, wherever they appear: version-control folders (`.git`, `.svn`, `.hg`, `.bzr`, `.plastic`), editor settings (`.vs`, `.idea`, `.vscode`, `.history`), package caches and dependencies (`node_modules`, `bower_components`, `jspm_packages`, `.yarn`, `.pnpm-store`, `site-packages`, `Pods`, `Carthage`, `.swiftpm`, `.build`, `.dart_tool`, `.pub-cache`), framework build caches (`.next`, `.nuxt`, `.output`, `.svelte-kit`, `.turbo`, `.parcel-cache`, `.vercel`, `.cache`, `.sass-cache`, `.gradle`), Python caches and environments (`__pycache__`, `.venv`, `venv`, `.tox`, `.nox`, `.eggs`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `.ipynb_checkpoints`), and operating-system clutter (`__MACOSX`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`).
 
-Also skipped: any `*.egg-info` folder; any folder holding `pyvenv.cfg` (a Python virtual environment, whatever it is called); `cmake-build-*` folders and any folder holding `CMakeCache.txt` (CMake build folders); a `packages` folder whose subfolders hold `.nupkg` files (NuGet's downloads); symbolic links and Windows junctions (they can loop or lead to code counted twice; the report says how many were skipped); and macOS `._*` metadata files.
+Also skipped: any `*.egg-info` folder; any folder holding `pyvenv.cfg` (a Python virtual environment, whatever it is called); `cmake-build-*` folders and any folder holding `CMakeCache.txt` (CMake build folders); a `packages` folder whose subfolders hold `.nupkg` files (NuGet's downloads); symbolic links and Windows junctions, to folders or to files (they can loop, lead to code counted twice, or lead outside the folder; the report says how many were skipped); named pipes and devices, which can't be read like files; and macOS `._*` metadata files.
 
 ### Skipped only at the root of a project of a given kind
 
@@ -187,7 +154,7 @@ Not counted as code: documentation and configuration text (`.txt`, `.md`, `.json
 
 The main table counts **non-blank lines**, comments included. Files saved as UTF-16 (common for Windows C++, C# and UnrealScript, and for scripts saved by SQL Server Management Studio) are converted first, so their blank lines count as blank.
 
-The standard measures (section 12) count **logical lines** as scc does: lines that are neither blank nor only a comment. For this the script knows each language's comment syntax, and recognises strings so that a `//` or `#` inside a string is not taken for a comment. It handles C-style comments, C++ raw strings, C# verbatim and raw strings, Python docstrings and triple-quoted strings, Lua long comments, PowerShell block comments, SQL and VB quoting, Haskell and OCaml block comments, Pascal's three comment styles, and column-based comments in COBOL (column 7), fixed-form Fortran (column 1), ABAP and JCL. Languages whose comment syntax it doesn't know have every non-blank line counted.
+The standard measures (section 12) count **logical lines**: lines that are neither blank nor only a comment. Those come from scc itself; the script doesn't count them.
 
 Some file types have lines removed before counting:
 
@@ -206,7 +173,7 @@ If some of them are code, run again with `--code-ext`:
 --code-ext ".atg=DMS grammar:Ada"
 ```
 
-The part after `=` is the language's name in the report. The optional part after `:` is a known language whose comment syntax it shares, used to count logical lines: `text` (the default: every non-blank line counts), `C`, `Ada`, `SQL`, `Lisp`, `Python` or `Pascal`. The option can be repeated. The same languages are passed on to scc (as `--count-as-pattern`) and jscpd (as `--formats-exts`), so the standard measures include them too. A specification it can't read stops the script with an explanation.
+The part after `=` is the language's name in the report. In the main table every non-blank line of it counts, as for every language. The optional part after `:` is a known language whose comment syntax it shares: `text` (the default), `C`, `Ada`, `SQL`, `Lisp`, `Python` or `Pascal`. It is passed on to scc (as `--count-as-pattern`, so scc counts its comments as comments; with `text`, every non-blank line is a logical line) and to jscpd (as `--formats-exts`), so the standard measures include these files too. The option can be repeated. A specification it can't read stops the script with an explanation.
 
 ---
 
@@ -294,9 +261,9 @@ The format is identified from the file's first bytes: Access 97 or earlier (Jet 
 
 How much can be read depends on the computer:
 
-- **Windows with Microsoft Access installed**: everything. The script copies the database to a temporary folder and drives Access through PowerShell, with macros and code disabled. It reads the number of forms, reports, macros and modules, every query's SQL, the tables (and how many are linked over ODBC, for example to SQL Server, meaning the data lives there), and the source of every VBA module, including the code behind forms and reports. The copy is deleted afterwards.
+- **Windows with Microsoft Access installed**: everything. The script copies the database to a temporary folder and drives Access through PowerShell, with macros and code disabled; if Access can't confirm they are disabled, the database isn't opened. With `--offline`, Access isn't used at all, because opening a database can make Access connect to the tables it links to on other computers (a server, or a back-end database on a network share); mdbtools is used instead, if installed. It reads the number of forms, reports, macros and modules, every query's SQL, the tables (and how many are linked over ODBC, for example to SQL Server, meaning the data lives there), and the source of every VBA module, including the code behind forms and reports. The copy is deleted afterwards.
 - **Elsewhere, or without Access, with mdbtools installed**: everything except VBA. Query SQL comes from `mdb-queries`; the numbers of forms, reports, macros, modules and tables come from Access's object catalog. mdbtools gives each query's SQL on one line, so it is counted as Access shows it: one line per clause (`FROM`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `UNION` ...).
-- **Neither**: the database is listed and counted as a data file, and the report says to run the script on Windows with Access installed.
+- **Neither**: the database is listed and counted as a data file, and the report says to run the script on Windows with Access installed (or, with `--offline`, that Access wasn't used because of it).
 
 Queries whose names begin with `~` are the record sources of forms and reports, and are labelled "SQL (in Access forms and reports)". VBA from the database is also searched for authors named in comments (see [section 10](#10-contributors)).
 
@@ -326,7 +293,7 @@ These are zip files describing a SQL Server database. The script reads `model.xm
 
 ### SQL Server databases (`--sql-server`)
 
-Code that exists only inside a running SQL Server is read with `--sql-server SERVER` (repeatable). The script uses `sqlcmd` (found on `PATH` or in its usual install folders on Windows and Linux) and signs in with Windows authentication, unless `SQLCMDUSER` and `SQLCMDPASSWORD` are set in the environment, in which case `sqlcmd` uses those. It first tries trusting the server's certificate (newer `sqlcmd` versions insist on encryption), then without.
+Code that exists only inside a running SQL Server is read with `--sql-server SERVER` (repeatable). The script uses `sqlcmd` (found on `PATH` or in its usual install folders on Windows and Linux) and signs in with Windows authentication, unless `SQLCMDUSER` and `SQLCMDPASSWORD` are set in the environment, in which case `sqlcmd` uses those. `sqlcmd` checks the server's certificate (newer versions encrypt, and check the certificate, by default). If that fails, as it does for a server with its own self-signed certificate, the report says so; for a server you trust, add `--trust-server-certificate`, which passes `sqlcmd` its `-C` option. `--sql-server` can't be combined with `--offline`.
 
 It reads every user database that is online, or only those named with `--sql-database`. From each it reads the definitions of user-created modules (stored procedures, functions, views, triggers, rules) from `sys.sql_modules`, and the number of user tables. Nothing else is queried. Each definition is counted as "T-SQL (in the SQL Server database)", unless the same object (by schema and name) was already counted from a `.sql` script.
 
@@ -454,7 +421,7 @@ Among the owner's code, a file whose contents are byte-for-byte identical to ano
 
 ### Build output
 
-Build output is skipped by the folder rules in section 3. In addition, if the folder is a Git repository, files Git is told to ignore are left out of the standard measures (as scc leaves them out), though they are still counted in the main table.
+Build output is skipped by the folder rules in section 3. In addition, scc and jscpd leave out files that `.gitignore` files ignore, so those are in the main table but not in the standard measures.
 
 ### Files not committed
 
@@ -473,7 +440,7 @@ The script looks for each system's marker in the scanned folder or any of the si
 | Git | `git rev-parse` succeeds, or `.git` | `git log --all` (every branch), names and emails through the repository's `.mailmap` | commits |
 | Perforce | `p4` reports submitted changes for the folder; or `.p4config`, `.p4ignore`, `p4config.txt` (or the file `P4CONFIG` names) | `p4 changes -l -s submitted <folder>/...` | submitted changelists |
 | SVN | `.svn` | `svn log --xml -r HEAD:1` (up to the newest revision on the server, not just the checkout's), falling back to the checkout's own history | revisions |
-| Mercurial | `.hg` | `hg log` | commits (merges from the second parent) |
+| Mercurial | `.hg` | `hg log`, ignoring the repository's own settings (Mercurial 5.4 or later; an older one isn't run, and the report says so) | commits (merges from the second parent) |
 | Plastic SCM / Unity Version Control | `.plastic` | `cm find changeset`; code reviews from `cm find review` | changesets |
 | Team Foundation (TFVC) | `$tf`, `.$tf`, `.tfignore` | `tf history . /recursive` | changesets |
 | Bazaar | `.bzr` | `brz log`, or `bzr log` | revisions |
@@ -485,7 +452,13 @@ The script looks for each system's marker in the scanned folder or any of the si
 
 If a system is found but its tool isn't installed, or reads no history, the report says so (for example "Bazaar (but the brz command isn't installed, so no history)", or "Perforce (no history: is p4 installed and logged in?)"). Perforce is detected by asking `p4` itself, because its settings often live in the registry or environment rather than in a file.
 
-All commands run without prompting for passwords (`GIT_TERMINAL_PROMPT=0`, Git Credential Manager non-interactive, SSH in batch mode), with UTF-8 output, and with time limits. `p4` is run with `PWD` set to the folder, because it finds its `P4CONFIG` settings from `PWD`.
+All commands are told not to prompt for passwords (`GIT_TERMINAL_PROMPT=0`, Git Credential Manager non-interactive, Git's SSH in batch mode, `svn --non-interactive`), and run with UTF-8 output and with time limits. `p4` is run with `PWD` set to the folder, because it finds its `P4CONFIG` settings from `PWD`.
+
+A copied repository's own settings could make these tools start programs, so the script switches those off: for Git, hooks, fsmonitor, external diff and textconv programs, signature checks, credential helpers and every network transport (except when it asks a server, from outside the repository); for Mercurial, the repository's whole `.hg/hgrc`; for Darcs, hooks. A CVS root or a Perforce settings file that would start a program to reach the server isn't used. [SECURITY.md](SECURITY.md) lists each of these.
+
+**Git ownership.** Git refuses to read a repository that belongs to another user account (common on external drives and in folders copied from another computer), because its settings could run programs as whoever reads it. When Git refuses one for that reason, the script runs the same command again naming that one repository as safe (`safe.directory=<that repository>`, on the command line only), with the settings above still switched off. It never trusts every repository (`safe.directory=*`), and doesn't change Git's own settings. The report says when this happened.
+
+**With `--offline`**, histories that come from a server aren't read: Perforce, Plastic, TFVC, and SVN, CVS or Bazaar when the history isn't on this computer (an SVN repository at a `file://` address, a local CVS root, a Bazaar branch that isn't a lightweight checkout of one elsewhere). The report lists what was left out. Git, Mercurial, Fossil and Darcs keep the whole history in the working copy, so they are read as usual.
 
 Dates: TFVC and Plastic print dates in the computer's local format, so only the year is used from them.
 
@@ -506,12 +479,12 @@ When a subfolder of a Git repository is scanned, only the commits that touched t
 Pull requests are found three ways, and each is reported separately:
 
 1. **In commit messages.** "Merge pull request #N" (GitHub, Bitbucket Server), "Merged in branch (pull request #N)" (Bitbucket Cloud), "See merge request group/project!N" (GitLab), "Merged PR N:" (Azure DevOps), and GitHub squash merges ending in "(#N)". Each numbering scheme is kept separate, and each number is counted once however many commits mention it. Code reviews are found the same way: Gerrit `Change-Id`s, Phabricator `Differential Revision`s, and Perforce Swarm `#review-N`. These are read from the change messages of every system the script reads messages from: all of them except TFVC (whose history is read without messages) and SourceSafe.
-2. **On the Git server.** GitHub, GitLab and Bitbucket Server keep a ref for every pull request ever opened (`refs/pull/N/...`, `refs/merge-requests/N/...`, `refs/pull-requests/N/...`). `git ls-remote` on each remote counts them: open, closed and merged. A remote that can't be reached is reported as "couldn't connect", not as zero pull requests.
-3. **Through GitHub's API**, if `gh` is installed and logged in: the number of merged pull requests for each GitHub remote.
+2. **On the Git server.** GitHub, GitLab and Bitbucket Server keep a ref for every pull request ever opened (`refs/pull/N/...`, `refs/merge-requests/N/...`, `refs/pull-requests/N/...`). `git ls-remote` on each remote counts them: open, closed and merged. A remote that can't be reached is reported as "couldn't connect", not as zero pull requests. A remote that is a folder on a network share isn't asked (it keeps no pull requests, and the repository's settings could name any computer). Not with `--offline`.
+3. **Through GitHub's API**, if `gh` is installed and logged in: the number of merged pull requests for each GitHub remote. Not with `--offline`.
 
 Plastic code reviews are counted with `cm find review`.
 
-If none are found in a Git repository, the report says "none found in commit messages or on the server (which doesn't mean there were none)". The summary uses the largest pull-request count found.
+If none are found in a Git repository, the report says "none found in commit messages or on the server (which doesn't mean there were none)", or, with `--offline`, that the server wasn't asked. The summary uses the largest pull-request count found.
 
 ### Unreal Engine forks
 
@@ -529,11 +502,11 @@ Microsoft stopped selling SourceSafe in 2005 and its command line (`ss.exe`) is 
 **Finding the database.** A SourceSafe database is a folder with `srcsafe.ini` and a `data` folder. The script finds it:
 
 - inside the scanned folder (the database's own files are then not counted as code);
-- through the `SSDIR` environment variable;
-- where the project files say it is: `SccAuxPath` entries in `.sln`, `.vcproj`, `.vcxproj`, `.csproj`, `.vbproj` and `.scc` files. These locations are shown on screen only, never saved in the report (a server's name isn't for the report), and read if they can be reached;
-- with `--sourcesafe <folder>`.
+- through the `SSDIR` environment variable (with `--offline`, not if it names a network share);
+- where the project files say it is: `SccAuxPath` entries in `.sln`, `.vcproj`, `.vcxproj`, `.csproj`, `.vbproj` and `.scc` files. These locations are shown on screen only, never saved in the report (a server's name isn't for the report). One on this computer is read if it's there. One on a network share is never opened, since project files could name any computer: the report says to name it with `--sourcesafe` to include it;
+- with `--sourcesafe <folder>`, which may be on a network share (but not with `--offline`).
 
-SourceSafe has no server program, so a copy of the database from a backup or an old disk works as well as the original, as does a copy without `srcsafe.ini`, or the `data` folder on its own. The `Data_Path` setting in `srcsafe.ini` is honoured. Up to five databases are read.
+SourceSafe has no server program, so a copy of the database from a backup or an old disk works as well as the original, as does a copy without `srcsafe.ini`, or the `data` folder on its own. The `Data_Path` setting in `srcsafe.ini` is honoured, unless it points to a network share; then the database's own `data` folder is read instead. Up to five databases are read.
 
 **Reading it.** Every revision of every file is a record. Records with a wrong check value (a CRC-32 folded to 16 bits) are left out and counted as damaged in a note. Labels are counted separately. Actions that are not a change of their own (labels, "added" in a project, which duplicates "created" in the file's own record, and archive/restore) are left out.
 
@@ -618,14 +591,14 @@ The script looks for credentials that would have to be removed before code chang
 - **At the top of the folder**: a `LICENSE`, `LICENCE`, `COPYING`, `COPYRIGHT` or `EULA` file is classified as a non-commercial licence, AGPL, LGPL, GPL, MPL, Apache 2.0, MIT, BSD, zlib, Creative Commons, Unlicense/public domain, proprietary (all rights reserved), or "a licence of its own". Anything other than proprietary or its own raises a "licensed to others already" alert.
 - **In folders and file headers**: see section 7.
 - **Copyright years**: the range of years in copyright notices in the owner's code (1980-2049, including ranges like "2012-2016" and the © sign).
-- **Public repository**: if a GitHub, GitLab or Bitbucket remote can be read without logging in, the report says the code is already public.
+- **Public repository**: if a GitHub, GitLab or Bitbucket remote can be read without logging in, the report says the code is already public. (Not checked with `--offline`.)
 
 ### Code the project needs that isn't in the folder
 
 A project built on a company's own engine or shared library kept elsewhere (or lost) shows up here. The script collects:
 
 - **`#include` and `#import`s** in the owner's C-family code that don't resolve to any file in the scanned folder. Compiler and operating-system headers (the C and C++ standard libraries, POSIX, Windows, DirectX, Apple frameworks, OpenGL) are ignored. In an Unreal, Godot, Source or CRYENGINE project, the engine's own headers are expected and attributed to the engine. The rest are grouped by known library (Boost, Ogre, Bullet, PhysX, SDL, Qt, FMOD, Wwise, Steamworks, Havok, Scaleform, Bink and about 70 others) or by their first folder.
-- **Build files**: include and library folders outside the project named in premake (`includedirs`, `libdirs`), CMake (`include_directories`, `target_include_directories`, `link_directories`, `find_package`, `FetchContent_Declare`, `ExternalProject_Add`), Visual Studio project and property files (`AdditionalIncludeDirectories`, `AdditionalLibraryDirectories`, `IncludePath`, `LibraryPath`), Xcode (`HEADER_SEARCH_PATHS`, `LIBRARY_SEARCH_PATHS`, `FRAMEWORK_SEARCH_PATHS`), Meson (`dependency()`), and Makefiles and SCons (`-I`, `-L`, `pkg-config`). Each path is reduced to a library name: path noise (`include`, `lib`, `x64`, `Program Files` ...) and personal folders (and the user name after `Users/` or `home/`) are skipped, versions are read from names like `boost_1_55_0` ("boost 1.55.0"), and a path that is only a variable is named by the variable (`$(DXSDK_DIR)` gives "DXSDK"). Paths inside the project are ignored.
+- **Build files**: include and library folders outside the project named in premake (`includedirs`, `libdirs`), CMake (`include_directories`, `target_include_directories`, `link_directories`, `find_package`, `FetchContent_Declare`, `ExternalProject_Add`), Visual Studio project and property files (`AdditionalIncludeDirectories`, `AdditionalLibraryDirectories`, `IncludePath`, `LibraryPath`), Xcode (`HEADER_SEARCH_PATHS`, `LIBRARY_SEARCH_PATHS`, `FRAMEWORK_SEARCH_PATHS`), Meson (`dependency()`), and Makefiles and SCons (`-I`, `-L`, `pkg-config`). Each path is reduced to a library name: path noise (`include`, `lib`, `x64`, `Program Files` ...) and personal folders (and the user name after `Users/` or `home/`) are skipped, versions are read from names like `boost_1_55_0` ("boost 1.55.0"), and a path that is only a variable is named by the variable (`$(DXSDK_DIR)` gives "DXSDK"). A network path's computer and share names are left out (`\\buildsrv\libs\boost_1_55_0` gives "boost 1.55.0"). Paths inside the project are ignored.
 
 Names the script recognises as well-known libraries are listed as "Known libraries". Names it doesn't recognise are listed first, as possibly the owner's own code (an engine, shared code) to ask for, and raise an alert.
 
@@ -648,7 +621,7 @@ Codebase questionnaires commonly ask for the same handful of figures, defined by
 | Duplication ratio | jscpd with `--min-tokens 50 --min-lines 5`, ignoring `**/*.csv` |
 | Commits on the main branch, without merges or reverts | as `git log --oneline --no-merges` on the main branch, minus subjects containing "revert" |
 | Repositories | the number of histories found (at least 1) |
-| Primary language | the language with the most logical lines, named as forms name languages |
+| Primary language | the language with the most lines, named as forms name languages (see below) |
 | History | "Git, full history", "Git, but a shallow clone", another system (with the suggestion to convert it to Git or deliver a snapshot), or "flat snapshot" |
 | Changes made before 2022 | changes dated before AI coding assistants were common, out of all changes |
 
@@ -656,24 +629,23 @@ Codebase questionnaires commonly ask for the same handful of figures, defined by
 
 The script uses pinned versions: **scc 4.1.0** (from its GitHub releases) and **jscpd 5.4.1** (from registry.npmjs.org, where it is published as a self-contained program, so Node.js isn't needed). Builds are pinned for macOS (Apple silicon and Intel), Linux (ARM64 and x64; scc also 32-bit x86; jscpd for glibc and musl) and Windows (ARM64 and x64; scc also 32-bit x86).
 
-- Each is downloaded once and checked against a fixed SHA-256 checksum before use. A download that doesn't match is never run. Only the one program file is taken out of the archive.
+- Each is downloaded once, over HTTPS with the server's certificate checked (there is no retry without the check). The download is checked against a fixed SHA-256 checksum, then the one program file is taken out of it and checked against its own checksum. A file that doesn't match is never written or run.
 - They are kept in a cache folder: `%LOCALAPPDATA%\size_codebase_tools` on Windows, `~/Library/Caches/size_codebase_tools` on macOS, and `$XDG_CACHE_HOME/size_codebase_tools` (or `~/.cache/size_codebase_tools`) on Linux, in subfolders named by tool and version. Deleting the folder removes them.
-- If Python can't verify HTTPS certificates (python.org's macOS installer has none until its "Install Certificates" step is run), the download is retried without certificate verification; the pinned checksum is what vouches for the file.
-- If the download fails (offline, a proxy, a full disk), or with `--no-download`, the script uses a copy already in the cache, or an `scc`/`jscpd` already installed on `PATH` (whatever its version).
-- If neither tool can be used, the script **estimates** the figures itself and says why the tools weren't used.
+- The cached program's checksum is checked again before every run. A copy that doesn't match is deleted, and downloaded again if downloading is allowed.
+- No other copy is ever run: an `scc` or `jscpd` installed on the computer is not used.
+- jscpd is given its own configuration file, so a `.jscpd.json` in the project, or a `jscpd` section in its `package.json`, has no effect. Neither tool follows symbolic links.
 
 Both tools are run over the whole folder. Then only the owner's code is kept: the folders where the owner's code gives way to someone else's, to the engine, or to build output, and someone else's files among the owner's, are left out (from scc's per-file results, and through a jscpd ignore list). Paths marked `--own` inside such folders are kept. The report gives the number of folders and files left out (never their names) and scc's figure for the whole folder for comparison. The tools are not run when a single file is given.
 
-### The estimates
+### When scc or jscpd can't be used
 
-Without the tools, the script computes the same figures from what it has read:
+If a tool can't be used (there is no pinned build for this computer; it isn't in the cache and `--offline` or `--no-download` was given; the download or a checksum failed; or the tool ran but failed), **its figures are left out**: the script doesn't estimate them. The report says, under "Not included in the standard measures above", which figures are missing and why, and how to include them (for example, run again with an internet connection). In the JSON, `logical_lines`, `generated_lines` or `duplication_ratio` is then `null`, and `not_measured` gives the reason. On macOS, if the download failed because Python couldn't check the server's certificate (python.org's installer has no certificates until its "Install Certificates" step is run), the report says how to fix that.
 
-- **Logical lines**: from the per-language comment syntax described in section 4. Files Git ignores are left out, as scc leaves them out. Code read from databases (which scc can't see) is added as its non-blank lines, and the report says how many.
-- **Generated lines**: the logical lines of files classed as generated (section 8).
-- **Duplication**: like jscpd, it looks for runs of at least 5 lines and 50 tokens that repeat code seen earlier, in the same file or an earlier one; the first copy counts as original and each later copy as duplicated. Lines are compared ignoring their spacing, and comments have already been removed. Runs already seen are remembered in a fixed 32 MB Bloom filter, so memory use doesn't grow with the size of the codebase. The ratio is duplicated logical lines over logical lines.
-- **Primary language**: C and C++ are split by file (`.c` is C, `.h` is a C header, everything else C++), headers going to whichever of C and C++ is larger. Script-specific names are mapped to the form's names (UnityScript as JavaScript, T-SQL and PL/SQL as SQL, Pascal as Object Pascal). A language not on the form's list is shown as "Other", with its own name beside it.
+### Primary language
 
-The JSON output keeps both the tools' figures and the estimates.
+- **With scc**: by scc's logical lines in the owner's code, per language. Languages scc counts that aren't code (JSON, XML, YAML, Markdown, plain text, project files and the like) are left out. Code read from databases, which scc can't see, is added as its non-blank lines, and the report says so.
+- **Without scc**: by the non-blank lines in the "Apparently original source code" table, and the report says so. C and C++ are split by file there: `.c` is C, `.h` is a C header, everything else C++.
+- Either way, C headers go to whichever of C and C++ is larger, and names are mapped to the ones forms use (UnityScript as JavaScript, T-SQL and PL/SQL as SQL, Pascal as Object Pascal, scc's "BASH" as Shell, and so on). A language not on the forms' list is shown as "Other", with its own name beside it.
 
 ### Commits
 
@@ -700,11 +672,11 @@ The report is saved as `size_report_<name>.txt`, where `<name>` is the scanned f
 - `size_report_<name>.json`: the same numbers, for reading by machine.
 - With `--reports`: `size_report_<name>_scc.json` and `size_report_<name>_jscpd.json`.
 
-They are saved next to the script. If that folder can't be written to, they go in the current folder, and failing that, the home folder. If none works, the script says to copy the report from the screen.
+They are saved next to the script. If that folder can't be written to, they go in the current folder, and failing that, the home folder. If none works, the script says to copy the report from the screen. An existing file of the same name is replaced; if it is a symbolic link, the link itself is replaced, so the report is never written into the file it points to.
 
 ### The text report, in order
 
-1. Project name, then a **summary**: apparently original code (with the top three languages), visual-scripting nodes, the first history in one line (changes, people, date range, pull requests), contributors across all histories, the combined SourceSafe and Git history, and the "Check" list.
+1. The script's name and version (`size_codebase.py 1.0.0`, with a note if `--offline` was given), the project name, then a **summary**: apparently original code (with the top three languages), visual-scripting nodes, the first history in one line (changes, people, date range, pull requests), contributors across all histories, the combined SourceSafe and Git history, and the "Check" list.
 2. Project types found; Unreal versions that saved the assets; version control found; total size.
 3. **Apparently original source code** by language, with notes on tests, Epic's and other engines' notices, exact copies, files not committed to Git, and console code.
 4. Original code by folder; folders with their own licence file; text files of unknown kinds.
@@ -714,13 +686,14 @@ They are saved next to the script. If that folder can't be written to, they go i
 8. Someone else's code (with its breakdown by library, package or licence), Unreal Engine's own code, translations, generated code, data.
 9. Precompiled libraries, and notes: built Unity game, packaged Unreal game, Git LFS placeholders, linked folders, paths marked by hand, cooked assets, Ren'Py without source, credentials, no assets.
 10. Assets by kind.
-11. Version-control histories, SourceSafe, file dates when there is no history, people named as authors, copyright years, the licence at the top, public repository, submodules, custom engines, nested repositories, and the history caveats.
-12. **Standard measures.**
-13. Problems while scanning, if any. An unexpected error on one file, or in one section of the report, doesn't stop the scan; up to five distinct error messages are listed and the rest of the report is unaffected.
+11. Version-control histories, SourceSafe, file dates when there is no history, people named as authors, copyright years, the licence at the top, public repository, submodules, custom engines, nested repositories, the history caveats, and a note if Git first refused a repository that belongs to another user account (section 9).
+12. **Standard measures**, with what couldn't be measured and why.
+13. With `--offline`: that no other computer was contacted, and what was left out because of it.
+14. Problems while scanning, if any. An unexpected error on one file, or in one section of the report, doesn't stop the scan; up to five distinct error messages are listed and the rest of the report is unaffected. Paths in them are replaced: the scanned folder by `<project>`, the home folder by `~`, and anything else that looks like a path, or a quoted file name, by `<path>`.
 
 ### The JSON file
 
-Top-level keys: `project`, `project_types`, `lines` (files and lines per language for each category: own, test, third-party, engine, generated, translation, data), `own_total`, `duplicate_lines`, `untracked_lines`, `console_lines`, `third_party_by_library`, `folders`, `visual_scripting`, `unreal_coverage`, `unreal_versions`, `assets`, `version_control`, `histories` (rows, reviews and notes of each), `contributors`, `dependencies_not_here`, `precompiled_libraries`, `credentials` (kinds and file counts), `copyright_years`, `licence`, `public_repositories`, `submodules`, `alerts`, `problems`, `standard_measures` (the figures, the estimates beside them, and the tools' versions), `unknown_text_files`, `code_extensions_named` and `databases`. Like the text report, it holds no author names, no code and no credential text.
+Top-level keys: `script_version`, `offline`, `left_out_offline`, `git_repositories_of_other_users` (how many), `project`, `project_types`, `lines` (files and lines per language for each category: own, test, third-party, engine, generated, translation, data), `own_total`, `duplicate_lines`, `untracked_lines`, `console_lines`, `third_party_by_library`, `folders`, `visual_scripting`, `unreal_coverage`, `unreal_versions`, `assets`, `version_control`, `histories` (rows, reviews and notes of each), `contributors`, `dependencies_not_here`, `precompiled_libraries`, `credentials` (kinds and file counts), `copyright_years`, `licence`, `public_repositories`, `submodules`, `alerts`, `problems`, `standard_measures` (the figures, `null` where a tool couldn't be used, with `not_measured` saying why; the tools' versions; and the primary language and what it was judged from), `unknown_text_files`, `code_extensions_named` and `databases`. Like the text report, it holds no author names, no code and no credential text.
 
 ---
 
@@ -737,16 +710,19 @@ On Windows, `py` works in place of `python3`, and so does double-clicking the sc
 | `PATH` | A folder to scan, or a single file (such as an Access database). Several can be given; each is scanned and reported separately. With none, the script asks for folders interactively. |
 | `--third-party PATH` | Count this folder or file as someone else's code. Relative to the scanned folder, or absolute. Repeatable. Overrides every automatic rule. |
 | `--own PATH` | Count this folder or file as the owner's own code, even inside a folder that would otherwise be third-party. Repeatable. |
-| `--code-ext .EXT=NAME[:LIKE]` | Count files with this extension as code in language NAME. LIKE is a language whose comments it shares, for logical-line counting: `text` (default), `C`, `Ada`, `SQL`, `Lisp`, `Python` or `Pascal`. Repeatable. Passed on to scc and jscpd. |
-| `--sql-server SERVER` | Read the code (procedures, functions, views, triggers) from this running SQL Server through `sqlcmd`. Windows sign-in, or `SQLCMDUSER`/`SQLCMDPASSWORD`. Repeatable. |
+| `--code-ext .EXT=NAME[:LIKE]` | Count files with this extension as code in language NAME. LIKE is a known language whose comments it shares, for scc and jscpd: `text` (default), `C`, `Ada`, `SQL`, `Lisp`, `Python` or `Pascal`. Repeatable. |
+| `--sql-server SERVER` | Read the code (procedures, functions, views, triggers) from this running SQL Server through `sqlcmd`. Windows sign-in, or `SQLCMDUSER`/`SQLCMDPASSWORD`. Repeatable. Can't be combined with `--offline`. |
 | `--sql-database NAME` | With `--sql-server`: read only this database instead of every user database. Repeatable; applies to every server named. |
-| `--sourcesafe PATH` | A Visual SourceSafe database (the folder with `srcsafe.ini`, a copy without it, or its `data` folder) holding this code's history. Repeatable. |
-| `--no-download` | Don't download scc or jscpd. A copy already in the cache, or one installed on `PATH`, is still used; otherwise the figures are estimated. |
+| `--trust-server-certificate` | With `--sql-server`: trust the server's certificate without checking it (`sqlcmd -C`), for a server you trust that has its own self-signed certificate. |
+| `--sourcesafe PATH` | A Visual SourceSafe database (the folder with `srcsafe.ini`, a copy without it, or its `data` folder) holding this code's history. May be on a network share, except with `--offline`. Repeatable. |
+| `--offline` | Connect to no other computer: no downloads (a copy of scc or jscpd downloaded before is still used, after its checksum is checked), no version-control servers, no network shares besides the folder scanned, and Access databases aren't opened in Microsoft Access. The report lists what that left out. |
+| `--no-download` | Don't download scc or jscpd. A copy already in the cache is still used; otherwise their figures are left out. |
 | `--reports` | Also save scc's and jscpd's own JSON reports beside the report. jscpd's contains copies of duplicated code and file names. |
+| `-h`, `--help` | Print the script's version and how to use it, and stop. |
 
-Environment variables the script reads: `SSDIR` (a SourceSafe database), `SQLCMDUSER` and `SQLCMDPASSWORD` (SQL Server sign-in, used by `sqlcmd`), `ASSETSTORE_CACHE_PATH` (a moved Unity Asset Store cache), `P4CONFIG` (the name of Perforce's settings file), `LOCALAPPDATA`, `APPDATA` and `XDG_CACHE_HOME` (standard locations).
+Environment variables: `SSDIR` names a SourceSafe database; `SQLCMDUSER` and `SQLCMDPASSWORD` are a SQL Server sign-in, used by `sqlcmd`; `ASSETSTORE_CACHE_PATH` is a moved Unity Asset Store cache; `P4CONFIG` is the name of Perforce's settings file. [SECURITY.md](SECURITY.md) lists every variable and setting the script and the tools it runs read.
 
-Notes on parsing: there is no `--help`. An argument that isn't one of the options above is taken as a path, so a misspelled option is reported as "Not a folder or file". An option given last, without a value, is also taken as a path. `--third-party` and `--own` paths given as relative paths are resolved against each scanned folder in turn.
+Notes on parsing: the script stops with a message, before scanning anything, at an argument beginning with `--` that isn't one of the options above ("Unknown option"), at an option that needs a value given last without one, and at `--offline` combined with `--sql-server` or with a `--sourcesafe` folder on a network share. Any other argument is taken as a path. `--third-party` and `--own` paths given as relative paths are resolved against each scanned folder in turn.
 
 ---
 
@@ -763,9 +739,13 @@ Notes on parsing: there is no `--help`. An argument that isn't one of the option
 
 **Skipped folders can't be brought back.** Folders skipped as caches, dependencies or build output (section 3) are never entered, so `--own` can't include them. In particular, a folder named `build` at the root of a Unity, Unreal, JavaScript or Python project, `out` or `dist` at the root of a JavaScript project, or `bin`/`obj` at the root of a .NET project, is skipped even if it holds source. Run the script on that folder directly to count it. Symbolic links and junctions are not followed either.
 
-**Extensions can mislead.** `.m` is counted as Objective-C (MATLAB files would be miscounted), `.pl` as Perl (not Prolog), `.inc` and `.v` are not counted, and `.fs` only inside a .NET project. Visual Basic extensions are checked for VB content, but other ambiguous extensions are not. Use `--third-party` to drop files, or `--code-ext` to add an unknown extension. Every non-blank line of a language whose comment syntax the script doesn't know counts as logical in the estimates.
+**Extensions can mislead.** `.m` is counted as Objective-C (MATLAB files would be miscounted), `.pl` as Perl (not Prolog), `.inc` and `.v` are not counted, and `.fs` only inside a .NET project. Visual Basic extensions are checked for VB content, but other ambiguous extensions are not. Use `--third-party` to drop files, or `--code-ext` to add an unknown extension.
 
-**The main table counts non-blank lines, comments included.** The standard measures count logical lines. Both are shown; they are not expected to match. Files Git ignores are in the main table but not in the standard measures.
+**The main table counts non-blank lines, comments included.** The standard measures count logical lines, as scc does. Both are shown; they are not expected to match. Files that `.gitignore` ignores are in the main table but not in the standard measures.
+
+**The standard measures need scc and jscpd.** Where one can't be used (offline before it was ever downloaded, say), its figures are missing from the report, not estimated, and the report says why. Without scc, the primary language is judged from the main table.
+
+**`--offline` leaves things out**: pull requests on the Git server, histories kept on a server, network shares named in your settings, and the VBA in Access databases (and their forms, reports and queries too, unless mdbtools is installed). The report lists what was left out.
 
 **Visual scripting is counted only for Unreal**, in nodes rather than lines. Cooked Unreal assets have no graphs to count, and some licensee-modified package formats can't be read (the report says how many, and how many appear to hold graphs). Construct's event sheets and other engines' visual scripts (stored as data assets) are not counted.
 
@@ -777,8 +757,6 @@ Notes on parsing: there is no `--help`. An argument that isn't one of the option
 
 **SourceSafe**: only the first five databases found are read, only the first is combined with Git, and `.ssa` archives must be restored with SourceSafe's own tools first.
 
-**Duplicate files are exact copies only.** Files that differ by a single byte are not duplicates; near-copies show up in the duplication ratio instead.
+**Duplicate files are exact copies only.** Files that differ by a single byte are not duplicates; near-copies show up in jscpd's duplication ratio instead.
 
-**The duplication estimate is approximate.** It uses a Bloom filter, which can very occasionally take a new run of lines for one already seen, and it compares lines after removing comments and spacing, which jscpd does slightly differently. When jscpd can run, its figure is used.
-
-**Check the report before sending it.** It is designed to hold counts and folder names only, but folder, library, package and branch names are the owner's own words, and the "Problems while scanning" section can contain file paths from operating-system error messages. If you use `--reports`, jscpd's report contains source code.
+**Check the report before sending it.** It is designed to hold counts and names only, but folder, library, package and branch names are the owner's own words. Paths in error messages are replaced, but an unquoted bare file name in one would stay. If you use `--reports`, scc's report lists every file's path and jscpd's contains source code.

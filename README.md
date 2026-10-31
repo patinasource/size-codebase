@@ -19,10 +19,13 @@ keeps engine code, plugins and third-party libraries out of your totals.
 3. It saves `size_report_<folder>.txt` and `size_report_<folder>.json` next to the script. Send
    both to whoever asked you to run it.
 
-It only reads files and uploads nothing. The report has counts and folder names only: no source
-code, no file names, no author names, so please read it before you send it. Point it at the real
-project, not a build or a ZIP download (a ZIP has no history), and if your history is in Perforce,
-Plastic or SVN, run it inside your workspace while logged in so it can read it.
+It only reads files and uploads nothing. The report holds counts and the names of folders,
+languages and libraries: no source code and no author names. Please read it before you send it.
+Point it at the real project, not a build or a ZIP download (a ZIP has no history), and if your
+history is in Perforce, Plastic or SVN, run it inside your workspace while logged in so it can read
+it. For code that mustn't leave your network, add `--offline`, which turns off every download and
+server request.
 
-For everything it handles, its options, and where it can go wrong, see
-[HOW_IT_WORKS.md](HOW_IT_WORKS.md).
+For everything it handles and where it can go wrong, see [HOW_IT_WORKS.md](HOW_IT_WORKS.md). For
+every connection it makes, every program it runs and how to verify your copy, see
+[SECURITY.md](SECURITY.md).
