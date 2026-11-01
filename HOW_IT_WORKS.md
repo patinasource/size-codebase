@@ -503,10 +503,10 @@ Microsoft stopped selling SourceSafe in 2005 and its command line (`ss.exe`) is 
 
 - inside the scanned folder (the database's own files are then not counted as code);
 - through the `SSDIR` environment variable (with `--offline`, not if it names a network share);
-- where the project files say it is: `SccAuxPath` entries in `.sln`, `.vcproj`, `.vcxproj`, `.csproj`, `.vbproj` and `.scc` files. These locations are shown on screen only, never saved in the report (a server's name isn't for the report). One on this computer is read if it's there. One on a network share is never opened, since project files could name any computer: the report says to name it with `--sourcesafe` to include it;
+- where the project files say it is: `SccAuxPath` entries in `.sln`, `.vcproj`, `.vcxproj`, `.csproj`, `.vbproj` and `.scc` files. These locations are shown on screen only, never saved in the report (a server's name isn't for the report). One on this computer is read if it's there. One on a network share is opened only with `--network-sourcesafe`, since project files could name any computer: without it, the report says to add `--network-sourcesafe`, or to name it with `--sourcesafe`;
 - with `--sourcesafe <folder>`, which may be on a network share (but not with `--offline`).
 
-SourceSafe has no server program, so a copy of the database from a backup or an old disk works as well as the original, as does a copy without `srcsafe.ini`, or the `data` folder on its own. The `Data_Path` setting in `srcsafe.ini` is honoured, unless it points to a network share; then the database's own `data` folder is read instead. Up to five databases are read.
+SourceSafe has no server program, so a copy of the database from a backup or an old disk works as well as the original, as does a copy without `srcsafe.ini`, or the `data` folder on its own. The `Data_Path` setting in `srcsafe.ini` is honoured, unless it points to a network share; then the database's own `data` folder is read instead, unless `--network-sourcesafe` is given. Up to five databases are read.
 
 **Reading it.** Every revision of every file is a record. Records with a wrong check value (a CRC-32 folded to 16 bits) are left out and counted as damaged in a note. Labels are counted separately. Actions that are not a change of their own (labels, "added" in a project, which duplicates "created" in the file's own record, and archive/restore) are left out.
 
@@ -676,7 +676,7 @@ They are saved next to the script. If that folder can't be written to, they go i
 
 ### The text report, in order
 
-1. The script's name and version (`size_codebase.py 1.0.0`, with a note if `--offline` was given), the project name, then a **summary**: apparently original code (with the top three languages), visual-scripting nodes, the first history in one line (changes, people, date range, pull requests), contributors across all histories, the combined SourceSafe and Git history, and the "Check" list.
+1. The script's name and version (for example `size_codebase.py 1.1.0`, with a note if `--offline` was given), the project name, then a **summary**: apparently original code (with the top three languages), visual-scripting nodes, the first history in one line (changes, people, date range, pull requests), contributors across all histories, the combined SourceSafe and Git history, and the "Check" list.
 2. Project types found; Unreal versions that saved the assets; version control found; total size.
 3. **Apparently original source code** by language, with notes on tests, Epic's and other engines' notices, exact copies, files not committed to Git, and console code.
 4. Original code by folder; folders with their own licence file; text files of unknown kinds.
@@ -715,6 +715,7 @@ On Windows, `py` works in place of `python3`, and so does double-clicking the sc
 | `--sql-database NAME` | With `--sql-server`: read only this database instead of every user database. Repeatable; applies to every server named. |
 | `--trust-server-certificate` | With `--sql-server`: trust the server's certificate without checking it (`sqlcmd -C`), for a server you trust that has its own self-signed certificate. |
 | `--sourcesafe PATH` | A Visual SourceSafe database (the folder with `srcsafe.ini`, a copy without it, or its `data` folder) holding this code's history. May be on a network share, except with `--offline`. Repeatable. |
+| `--network-sourcesafe` | Also open SourceSafe databases on network shares that the project files name, and a `Data_Path` on a network share in a database's `srcsafe.ini`. Without it they're named on screen but not opened. Can't be combined with `--offline`. |
 | `--offline` | Connect to no other computer: no downloads (a copy of scc or jscpd downloaded before is still used, after its checksum is checked), no version-control servers, no network shares besides the folder scanned, and Access databases aren't opened in Microsoft Access. The report lists what that left out. |
 | `--no-download` | Don't download scc or jscpd. A copy already in the cache is still used; otherwise their figures are left out. |
 | `--reports` | Also save scc's and jscpd's own JSON reports beside the report. jscpd's contains copies of duplicated code and file names. |
@@ -722,7 +723,7 @@ On Windows, `py` works in place of `python3`, and so does double-clicking the sc
 
 Environment variables: `SSDIR` names a SourceSafe database; `SQLCMDUSER` and `SQLCMDPASSWORD` are a SQL Server sign-in, used by `sqlcmd`; `ASSETSTORE_CACHE_PATH` is a moved Unity Asset Store cache; `P4CONFIG` is the name of Perforce's settings file. [SECURITY.md](SECURITY.md) lists every variable and setting the script and the tools it runs read.
 
-Notes on parsing: the script stops with a message, before scanning anything, at an argument beginning with `--` that isn't one of the options above ("Unknown option"), at an option that needs a value given last without one, and at `--offline` combined with `--sql-server` or with a `--sourcesafe` folder on a network share. Any other argument is taken as a path. `--third-party` and `--own` paths given as relative paths are resolved against each scanned folder in turn.
+Notes on parsing: the script stops with a message, before scanning anything, at an argument beginning with `--` that isn't one of the options above ("Unknown option"), at an option that needs a value given last without one, and at `--offline` combined with `--sql-server`, with `--network-sourcesafe`, or with a `--sourcesafe` folder on a network share. Any other argument is taken as a path. `--third-party` and `--own` paths given as relative paths are resolved against each scanned folder in turn.
 
 ---
 

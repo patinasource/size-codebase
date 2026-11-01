@@ -73,6 +73,7 @@ history needs, read-only, with the access you already have (it never stops to as
   - Perforce, Plastic SCM and TFVC, and SVN, CVS or Bazaar where the history is on a server: their
     own commands ask the server for the history.
   - --sql-server: that SQL Server. --sourcesafe or SSDIR: the folder named, even on a network share.
+  - --network-sourcesafe: SourceSafe databases on network shares that the project files name.
 Options:
   --offline        Connect to no other computer at all: no downloads (a copy of scc or jscpd
                    downloaded before still runs, after its checksum is checked), no version-control
@@ -83,6 +84,11 @@ Options:
   --reports        Save scc's and jscpd's own reports beside this one (see above).
   --trust-server-certificate
                    With --sql-server: trust the server's certificate without checking it (sqlcmd -C).
+  --network-sourcesafe
+                   Also open SourceSafe databases on network shares (\\\\server\\share) that the project
+                   files name, and a data folder on a network share that a database's srcsafe.ini
+                   names. Without it they're named on screen but not opened, since the project's
+                   files could name any computer. Can't be used with --offline.
   --third-party, --own, --code-ext, --sourcesafe, --sql-server, --sql-database: see above.
   -h, --help       Show this help.
 
@@ -99,7 +105,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from stat import S_ISREG
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 
 # #######################################
@@ -458,6 +464,7 @@ def other_owners_repository(stderr):
 # Connecting to other computers
 # ####################
 OFFLINE = False            # --offline: connect to no other computer at all
+NETWORK_SOURCESAFE = False  # --network-sourcesafe: open SourceSafe databases the project files name on a network share
 _left_out_offline = []     # what --offline left out of the project's report; emptied for each project
 
 
@@ -2769,9 +2776,10 @@ def vss_data_path(db):
                     data = m.group(1)
     except OSError:
         pass
-    # A srcsafe.ini can name a data folder on any computer (\\server\share\data): that isn't opened,
-    # like the databases project files name there (see SourceSafe.histories); its own one is.
-    return os.path.join(db, "data" if is_network_path(data) else data)
+    # A srcsafe.ini can name a data folder on any computer (\\server\share\data): that isn't opened
+    # without --network-sourcesafe, like the databases project files name there (see
+    # SourceSafe.histories); its own one is.
+    return os.path.join(db, "data" if is_network_path(data) and not NETWORK_SOURCESAFE else data)
 
 
 def vss_item_revisions(buf):
@@ -2928,10 +2936,10 @@ class SourceSafe:
 
     def histories(self):
         """[(database, history)] of the databases found, including ones the project files name on
-        this computer. Ones they name on another computer aren't opened: the project files could
-        name any server, and the user can name it with --sourcesafe."""
+        this computer. Ones they name on another computer aren't opened unless the user says so
+        (--network-sourcesafe): the project files could name any server."""
         for where in self.recorded:
-            if is_network_path(where):
+            if is_network_path(where) and not NETWORK_SOURCESAFE:
                 self.on_network.append(where)
             else:
                 self.add_database(where)
@@ -3013,7 +3021,8 @@ def sourcesafe_lines(root, vss, git_h, histories, alerts):
     for where in vss.recorded:   # on screen only: a server's name isn't for the report
         if where in vss.on_network:
             print(f"SourceSafe database named in the project files (shown here only, not saved in the report): {where}"
-                  f" (on a network share, so not opened; to include it, run this again with --sourcesafe \"{where}\")")
+                  f" (on a network share, so not opened; to include it, run this again with --network-sourcesafe,"
+                  f" or with --sourcesafe \"{where}\")")
             continue
         reachable = os.path.isfile(os.path.join(where, "srcsafe.ini"))
         print(f"SourceSafe database named in the project files (shown here only, not saved in the report): {where}"
@@ -3067,8 +3076,8 @@ def sourcesafe_lines(root, vss, git_h, histories, alerts):
     if vss.on_network:
         out += ["", "NOTE: The project files name a SourceSafe database on a network share. This script doesn't open",
                 "      network locations by itself, so it wasn't read. To include its history, run this again with",
-                "      --sourcesafe \"<that network folder>\" added (the folder was shown on screen, not in this",
-                "      report)."]
+                "      --network-sourcesafe added, or with --sourcesafe \"<that network folder>\" (the folder was shown",
+                "      on screen, not in this report)."]
     return out, combined
 
 
@@ -5986,7 +5995,7 @@ def main():
     # Options
     # ####################
     here = os.path.dirname(os.path.abspath(__file__))
-    global FETCH_TOOLS, KEEP_TOOL_REPORTS, OFFLINE, TRUST_SERVER_CERTIFICATE
+    global FETCH_TOOLS, KEEP_TOOL_REPORTS, OFFLINE, TRUST_SERVER_CERTIFICATE, NETWORK_SOURCESAFE
     roots, args = [], sys.argv[1:]
     marks = {"--third-party": [], "--own": [], "--sql-server": [], "--sql-database": [], "--sourcesafe": [],
              "--code-ext": []}
@@ -6003,6 +6012,8 @@ def main():
             KEEP_TOOL_REPORTS = True
         elif arg == "--trust-server-certificate":
             TRUST_SERVER_CERTIFICATE = True
+        elif arg == "--network-sourcesafe":
+            NETWORK_SOURCESAFE = True
         elif arg in marks:
             if not args:
                 stop(f"{arg} needs a value after it. For help: python3 size_codebase.py --help")
@@ -6027,6 +6038,9 @@ def main():
     if OFFLINE and any(is_network_path(db) for db in marks["--sourcesafe"]):
         stop("--sourcesafe names a folder on a network share, and --offline says not to connect to any other"
              " computer. Leave out one of the two, or name a copy of the database on this computer.")
+    if OFFLINE and NETWORK_SOURCESAFE:
+        stop("--network-sourcesafe opens SourceSafe databases on network shares, and --offline says not to connect"
+             " to any other computer. Leave out one of the two.")
     remove_old_temp_folders()
 
     # ####################
