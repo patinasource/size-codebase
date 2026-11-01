@@ -27,4 +27,6 @@ it.
 
 For everything it handles and where it can go wrong, see [HOW_IT_WORKS.md](HOW_IT_WORKS.md). For
 every connection it makes, every program it runs and how to verify your copy, see
-[SECURITY.md](SECURITY.md).
+[SECURITY.md](SECURITY.md). An AI security report is
+[here](https://chatgpt.com/share/6ae6985c-c480-83e8-9194-97f42bfd1344) (GPT 6, Pro effort level, on
+commit 2255998d, Oct 31st 2026).
