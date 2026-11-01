@@ -87,7 +87,7 @@ All programs are started with an argument list, never through a shell (`run`, `g
 
 ## Files and folders it writes
 
-- **The report**: `size_report_<name>.txt` and `size_report_<name>.json`, and with `--reports` also `size_report_<name>_scc.json` and `size_report_<name>_jscpd.json` (`save_report`, `write_report_file`). They go in the folder that holds the script (inside the project, if you put the script there); if it can't write there, the current folder; then the home folder. `<name>` is the scanned folder's (or file's) name with everything but letters and digits replaced by `_`, so it can't name another folder. A file of the same name is overwritten; a symbolic link of that name is removed rather than written through.
+- **The report**: `size_report_<name>.txt` and `size_report_<name>.json`, and with `--reports` also `size_report_<name>_scc.json` and `size_report_<name>_jscpd-summary.json` (`save_report`, `write_report_file`). They go in the folder that holds the script (inside the project, if you put the script there); if it can't write there, the current folder; then the home folder. `<name>` is the scanned folder's (or file's) name with everything but letters and digits replaced by `_`, so it can't name another folder. A file of the same name is overwritten; a symbolic link of that name is removed rather than written through.
 - **The tool cache** (`tools_folder`, `find_tool`): `%LOCALAPPDATA%\size_codebase_tools` on Windows, `~/Library/Caches/size_codebase_tools` on macOS, `$XDG_CACHE_HOME/size_codebase_tools` or `~/.cache/size_codebase_tools` on Linux, holding `scc-4.1.0/scc[.exe]` and `jscpd-5.4.1/jscpd[.exe]` (each written as `<name>.part`, then renamed). A cached copy that fails its checksum is deleted.
 - **Temporary folders** (`temp_folder`), made with `tempfile.mkdtemp` in your temporary folder: `size_codebase_jscpd_*`, holding jscpd's configuration and its report (which holds copies of duplicated code), deleted as soon as jscpd is done (`tool_measures`); and on Windows `size_codebase_access_*`, holding a copy of an Access database and the PowerShell script that reads it, deleted straight after (`read_access_database`). If a run is killed, a later run deletes such folders once they're a day old (`remove_old_temp_folders`), skipping links.
 
@@ -131,7 +131,7 @@ The text report and its JSON copy hold counts, plus the following, and nothing e
 
 It never holds source code, author names or email addresses (they're read to count people, and kept in memory only: `history`, `authors_in`), credentials, commit messages, or rows from database tables. Locations of SourceSafe databases named in the project's files are printed on screen only, never saved (`sourcesafe_lines`).
 
-**With `--reports`**, two more files are saved beside it: scc's report, which lists every file's path with its line counts, and jscpd's, which holds **copies of the duplicated code** and the paths of the files they're in. Read them before sending them.
+**With `--reports`**, two more files are saved beside it, for attaching to a form: scc's report (lines, comments and blank lines for each language; no file names) and jscpd's totals (`jscpd_summary`: only the numbers from its `statistics`, for each format and in all, and the date). Neither holds code or file names. jscpd's full report, which holds copies of the duplicated code, is never saved: it stays in jscpd's temporary folder, which is deleted straight after.
 
 ## Protections against a hostile project
 
@@ -162,7 +162,7 @@ These are the risks we know of and judge acceptable; the mitigation for each is 
 
 ## Verifying your copy
 
-Each release is tagged `v<version>` in the public repository, <https://github.com/patinasource/size-codebase>, which also has a `SHA256SUMS` file with the SHA-256 of `size_codebase.py`. The version is in the file (`__version__`), on the first line of every report (for example `size_codebase.py 1.1.0`), in the JSON (`script_version`), and on the first line of `--help`.
+Each release is tagged `v<version>` in the public repository, <https://github.com/patinasource/size-codebase>, which also has a `SHA256SUMS` file with the SHA-256 of `size_codebase.py`. The version is in the file (`__version__`), on the first line of every report (for example `size_codebase.py 1.2.0`), in the JSON (`script_version`), and on the first line of `--help`.
 
 Compute the checksum of your copy and compare it with `SHA256SUMS` at that release's tag:
 

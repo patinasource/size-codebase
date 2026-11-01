@@ -32,7 +32,7 @@ Contents:
 
 - **It only reads the project.** It writes its report, a cache holding scc and jscpd, and temporary folders that it deletes when done.
 - **Nothing is uploaded.** It connects to other computers only to download scc and jscpd once (checked against fixed SHA-256 checksums), and to ask your own version-control servers for history and pull-request counts, with the access you already have; the tools are told not to prompt for passwords. `--offline` turns all of that off (see [section 14](#14-command-line-reference)).
-- **The report holds counts**, and the names of folders, languages, libraries, packages and branches. It never holds source code, author names or email addresses (names are read to *count* people and stay in memory), credentials (only their kind and number of files), or database rows. It names a file only if you give that file on its own or mark it with `--third-party`. Error messages in it have paths replaced by `<project>`, `~` or `<path>`. With `--reports`, jscpd's own report is saved too, and that one holds copies of the duplicated code (see [section 12](#12-standard-measures-scc-jscpd)).
+- **The report holds counts**, and the names of folders, languages, libraries, packages and branches. It never holds source code, author names or email addresses (names are read to *count* people and stay in memory), credentials (only their kind and number of files), or database rows. It names a file only if you give that file on its own or mark it with `--third-party`. Error messages in it have paths replaced by `<project>`, `~` or `<path>`. With `--reports`, scc's report and jscpd's totals are saved too; both hold counts only (see [section 12](#12-standard-measures-scc-jscpd)).
 
 Look the report over before sending it: folder, library, package and branch names are the owner's own words. SECURITY.md lists exactly what can appear in it.
 
@@ -655,7 +655,7 @@ For systems that don't record merges, changes whose subject starts with "merge",
 
 ### `--reports`
 
-With `--reports`, scc's and jscpd's own JSON reports are saved beside the script's report, for attaching to a form. **jscpd's report holds copies of the duplicated code and the names of the files it is in: look it over before sending it.**
+With `--reports`, two more files are saved beside the script's report, for attaching to a form: scc's JSON report (lines by language, run with the form's command) and a summary of jscpd's report (`{"statistics": ...}`: its totals for each format and in all, as forms ask for it). Both hold counts only. jscpd's full report, which holds copies of the duplicated code and the names of their files, is never saved; it's deleted with jscpd's temporary folder.
 
 ---
 
@@ -670,13 +670,13 @@ Progress is shown on one line that keeps being overwritten (only when the output
 The report is saved as `size_report_<name>.txt`, where `<name>` is the scanned folder's name (or the file's name, when a single file was given) with every character other than letters and digits replaced by `_`. Beside it:
 
 - `size_report_<name>.json`: the same numbers, for reading by machine.
-- With `--reports`: `size_report_<name>_scc.json` and `size_report_<name>_jscpd.json`.
+- With `--reports`: `size_report_<name>_scc.json` and `size_report_<name>_jscpd-summary.json`.
 
 They are saved next to the script. If that folder can't be written to, they go in the current folder, and failing that, the home folder. If none works, the script says to copy the report from the screen. An existing file of the same name is replaced; if it is a symbolic link, the link itself is replaced, so the report is never written into the file it points to.
 
 ### The text report, in order
 
-1. The script's name and version (for example `size_codebase.py 1.1.0`, with a note if `--offline` was given), the project name, then a **summary**: apparently original code (with the top three languages), visual-scripting nodes, the first history in one line (changes, people, date range, pull requests), contributors across all histories, the combined SourceSafe and Git history, and the "Check" list.
+1. The script's name and version (for example `size_codebase.py 1.2.0`, with a note if `--offline` was given), the project name, then a **summary**: apparently original code (with the top three languages), visual-scripting nodes, the first history in one line (changes, people, date range, pull requests), contributors across all histories, the combined SourceSafe and Git history, and the "Check" list.
 2. Project types found; Unreal versions that saved the assets; version control found; total size.
 3. **Apparently original source code** by language, with notes on tests, Epic's and other engines' notices, exact copies, files not committed to Git, and console code.
 4. Original code by folder; folders with their own licence file; text files of unknown kinds.
@@ -718,7 +718,7 @@ On Windows, `py` works in place of `python3`, and so does double-clicking the sc
 | `--network-sourcesafe` | Also open SourceSafe databases on network shares that the project files name, and a `Data_Path` on a network share in a database's `srcsafe.ini`. Without it they're named on screen but not opened. Can't be combined with `--offline`. |
 | `--offline` | Connect to no other computer: no downloads (a copy of scc or jscpd downloaded before is still used, after its checksum is checked), no version-control servers, no network shares besides the folder scanned, and Access databases aren't opened in Microsoft Access. The report lists what that left out. |
 | `--no-download` | Don't download scc or jscpd. A copy already in the cache is still used; otherwise their figures are left out. |
-| `--reports` | Also save scc's and jscpd's own JSON reports beside the report. jscpd's contains copies of duplicated code and file names. |
+| `--reports` | Also save scc's JSON report and jscpd's totals beside the report, for attaching to a form. Both hold counts only. |
 | `-h`, `--help` | Print the script's version and how to use it, and stop. |
 
 Environment variables: `SSDIR` names a SourceSafe database; `SQLCMDUSER` and `SQLCMDPASSWORD` are a SQL Server sign-in, used by `sqlcmd`; `ASSETSTORE_CACHE_PATH` is a moved Unity Asset Store cache; `P4CONFIG` is the name of Perforce's settings file. [SECURITY.md](SECURITY.md) lists every variable and setting the script and the tools it runs read.
@@ -760,4 +760,4 @@ Notes on parsing: the script stops with a message, before scanning anything, at 
 
 **Duplicate files are exact copies only.** Files that differ by a single byte are not duplicates; near-copies show up in jscpd's duplication ratio instead.
 
-**Check the report before sending it.** It is designed to hold counts and names only, but folder, library, package and branch names are the owner's own words. Paths in error messages are replaced, but an unquoted bare file name in one would stay. If you use `--reports`, scc's report lists every file's path and jscpd's contains source code.
+**Check the report before sending it.** It is designed to hold counts and names only, but folder, library, package and branch names are the owner's own words. Paths in error messages are replaced, but an unquoted bare file name in one would stay.

@@ -60,10 +60,11 @@ official releases (github.com, registry.npmjs.org), over HTTPS with the certific
 checked against fixed checksums, as is the program each time before it runs; nothing needs
 installing, and they're kept in a cache folder (on Windows %LOCALAPPDATA%\\size_codebase_tools).
 No other copy of them is ever run. If one can't be downloaded, its figures are left out of the
-report, which says why. To also save their own reports beside this one, for attaching to a form:
+report, which says why. To also save scc's report and a summary of jscpd's beside this one, for
+attaching to a form:
     python3 size_codebase.py "/path/to/project" --reports
-(jscpd's report holds copies of the duplicated code and the names of their files: look it over
-before sending it.)
+(Both hold counts only. jscpd's full report, which holds copies of the duplicated code, is never
+saved: only its totals are, as forms ask.)
 
 Connecting to other computers. Besides downloading scc and jscpd, it asks servers only for what the
 history needs, read-only, with the access you already have (it never stops to ask for a password):
@@ -81,7 +82,7 @@ Options:
                    opened in Microsoft Access. The report says what that left out. Can't be used
                    with --sql-server.
   --no-download    Don't download scc or jscpd (copies downloaded before are still used).
-  --reports        Save scc's and jscpd's own reports beside this one (see above).
+  --reports        Save scc's report and jscpd's totals beside this one (see above).
   --trust-server-certificate
                    With --sql-server: trust the server's certificate without checking it (sqlcmd -C).
   --network-sourcesafe
@@ -105,7 +106,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from stat import S_ISREG
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 # #######################################
@@ -4702,7 +4703,8 @@ def tool_measures(root, leave_out):
     """scc's and jscpd's figures, with the options forms give, for the studio's own code: leave_out
     lists the folders ("folder/**") and files that aren't (see left_out_paths). scc counts the whole
     folder file by file, so the figure for all of it comes too. ({figures}, {tool: why it wasn't
-    run}, {tool: its own report, if KEEP_TOOL_REPORTS}). jscpd's report holds copies of the code."""
+    run}, {tool: its report to save, if KEEP_TOOL_REPORTS}). jscpd's own report holds copies of the
+    code, so only its totals are kept (jscpd_summary)."""
     found, missing, reports = {}, {}, {}
     matching = {os.path.normcase(p[:-3] if p.endswith("/**") else p).replace("\\", "/") for p in leave_out}
     matching |= {"**"} if "**" in leave_out else set()
@@ -4768,13 +4770,29 @@ def tool_measures(root, leave_out):
             found["jscpd_duplicated_lines"], found["jscpd_lines"] = total.get("duplicatedLines"), total.get("lines")
             found["jscpd_version"] = version
             if KEEP_TOOL_REPORTS:
-                reports["jscpd"] = text
+                reports["jscpd"] = jscpd_summary(text)
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             missing["jscpd"] = "jscpd ran, but failed"
         finally:
             shutil.rmtree(out, ignore_errors=True)
             progress()
     return found, missing, reports
+
+
+def jscpd_summary(text):
+    """jscpd's report cut down to its totals, as forms ask for it ({"statistics": ...}): the numbers
+    for each format and in all, and the date. The rest of the report (each copy, with the code
+    copied and the files it's in) is left behind, and so is anything in the totals that isn't a
+    number, so no code and no file name can get through."""
+    stats = json.loads(text)["statistics"]
+
+    def numbers(d):
+        return {k: v for k, v in (d or {}).items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    return json.dumps({"statistics": {
+        "detectionDate": str(stats.get("detectionDate", ""))[:40],
+        "formats": {re.sub(r"[^\w+#.-]", "", str(fmt))[:40]: numbers((v or {}).get("total") if "total" in (v or {}) else v)
+                    for fmt, v in (stats.get("formats") or {}).items()},
+        "total": numbers(stats.get("total"))}}, indent=2)
 
 
 # ##############################
@@ -5924,10 +5942,13 @@ def dropped_path(text):
     return text.strip("'\"")
 
 
+TOOL_REPORT_NAMES = {"scc": "scc", "jscpd": "jscpd-summary"}   # size_report_<name>_<this>.json
+
+
 def save_report(report, name, here, facts=None):
     """Saves next to this script or, if that folder is read-only, in the current or home folder. The
-    numbers go in a .json beside it too, for reading by machine, and scc's and jscpd's own reports
-    (facts["tool_reports"], with --reports) beside that."""
+    numbers go in a .json beside it too, for reading by machine, and scc's report and jscpd's
+    totals (facts["tool_reports"], with --reports) beside that."""
     tool_reports = (facts or {}).pop("tool_reports", {})
     for folder in (here, os.getcwd(), os.path.expanduser("~")):
         out_path = os.path.join(folder, f"size_report_{name}.txt")
@@ -5938,7 +5959,7 @@ def save_report(report, name, here, facts=None):
                                   json.dumps(facts, indent=1, default=sorted))
             for tool, text in tool_reports.items():
                 if text:
-                    write_report_file(os.path.join(folder, f"size_report_{name}_{tool}.json"), text)
+                    write_report_file(os.path.join(folder, f"size_report_{name}_{TOOL_REPORT_NAMES[tool]}.json"), text)
             return out_path
         except OSError:
             continue
@@ -5970,8 +5991,8 @@ def scan(root, here, third_party=(), own=(), sql_servers=(), sourcesafe=()):
     out_path = save_report(report, name, here, facts)
     print(f"Saved: {out_path}\n" if out_path else "Couldn't save the report: please copy it from above.\n")
     if out_path and KEEP_TOOL_REPORTS:
-        print("Also saved beside it: scc's and jscpd's own reports (_scc.json, _jscpd.json). jscpd's holds copies of\n"
-              "the duplicated code and the names of the files they're in: look it over before sending it.\n")
+        print("Also saved beside it: scc's report and jscpd's totals (_scc.json, _jscpd-summary.json), for attaching\n"
+              "to a form. Both hold counts only.\n")
 
 
 def usage():
