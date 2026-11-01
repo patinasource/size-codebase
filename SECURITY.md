@@ -18,7 +18,7 @@ python3 size_codebase.py "/path/to/project"
 
 On Windows, `py` instead of `python3`. `--help` prints the options.
 
-**For sensitive code, offline:**
+**Where policy forbids tools from making any network connection, offline** (none of your code is sent anywhere either way; this only stops the downloads and server queries listed below):
 
 ```
 python3 size_codebase.py --offline "/path/to/project"
