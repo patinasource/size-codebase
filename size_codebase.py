@@ -6,7 +6,9 @@ Ren'Py, Python and JavaScript/TypeScript projects out of the box, and counts mos
 languages too, and systems built with Microsoft Access and SQL Server (forms, reports, queries, VBA,
 stored procedures, SSIS and SSRS). Counts commits, contributors and pull requests from Git, Perforce,
 SVN, Mercurial, Plastic SCM (Unity Version Control), Team Foundation (TFVC), Bazaar, Fossil, Darcs, CVS
-and Visual SourceSafe; without version control, counts the people named as authors in the code.
+and Visual SourceSafe, counting each change once when a project moved from one system to another
+(even several times) and two or more of them hold it; without version control, counts the people
+named as authors in the code.
 
 Usage (Windows, macOS or Linux):
     python3 size_codebase.py "/path/to/project"  ["/path/to/other" ...]
@@ -19,15 +21,15 @@ If it gets a folder wrong, say so (paths relative to the project folder, or abso
 
 Code in a language it doesn't know (one of the studio's own, say) is listed as text files of unknown
 kinds. Name each extension; it's then counted as code (every non-blank line), and scc and jscpd
-(below) read it as text, or as a known language whose comments it shares (C, Ada, SQL, Lisp, Python
-or Pascal); repeatable:
+(below) read it as text, or as a known language whose comments it shares (C, C++, Ada, SQL, Lisp,
+Python, Pascal, Lua or Visual Basic); repeatable:
     python3 size_codebase.py "/path/to/project" --code-ext .par=PARLANSE --code-ext ".atg=DMS grammar:Ada"
 
 Visual SourceSafe: its history is read straight from the SourceSafe database (the folder with
 srcsafe.ini and a data folder), found inside the project, through the SSDIR setting, or where the
 project files say it is, if that's on this computer (a database the project files place on a
 network share isn't opened by itself: name it with --sourcesafe). If it's somewhere else, name it;
-its history is then put together with the Git history, without counting work that is in both twice:
+its history is then put together with the others, without counting work that is in both twice:
     py size_codebase.py "C:\\path\\to\\project" --sourcesafe "D:\\OldVSS"
 SourceSafe has no server program: its database is just a folder of files, so a copy of it (from a
 backup or an old disk) works as well as the original, as does its data folder on its own.
@@ -102,11 +104,11 @@ import shutil
 import struct
 import subprocess
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, namedtuple
 from datetime import datetime, timezone
 from stat import S_ISREG
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 
 # #######################################
@@ -368,7 +370,7 @@ WINDOWS_TOOL_PATHS = {
     "hg": [r"C:\Program Files\TortoiseHg\hg.exe", r"C:\Program Files\Mercurial\hg.exe"],
     "p4": [r"C:\Program Files\Perforce\p4.exe", r"C:\Program Files (x86)\Perforce\p4.exe"],
     "cm": [r"C:\Program Files\PlasticSCM5\client\cm.exe", r"C:\Program Files\Unity\Version Control\client\cm.exe",
-           r"C:\Program Files\Unity Version Control\client\cm.exe"],
+           r"C:\Program Files\Unity Version Control\client\cm.exe", r"C:\Program Files\Unity VCS\client\cm.exe"],
     "tf": [r"C:\Program Files\Microsoft Visual Studio\*\*\Common7\IDE\CommonExtensions\Microsoft\TeamFoundation"
            r"\Team Explorer\TF.exe",
            r"C:\Program Files (x86)\Microsoft Visual Studio\*\*\Common7\IDE\CommonExtensions\Microsoft"
@@ -382,11 +384,18 @@ WINDOWS_TOOL_PATHS = {
 }
 
 
+# The same on macOS and Linux, where an app's installer may not have linked its tool onto PATH.
+POSIX_TOOL_PATHS = {
+    "cm": ["/Applications/PlasticSCM.app/Contents/MacOS/cm", "/Applications/PlasticSCM.app/Contents/Applications/cm.app"
+           "/Contents/MacOS/cm", "/opt/plasticscm5/client/cm"],
+}
+
+
 def tool_path(name):
     """Where a command-line tool is installed. On Windows, tools that came with GitHub Desktop,
     TortoiseSVN, P4V, Visual Studio and the like often aren't on PATH."""
     if os.name != "nt":
-        return shutil.which(name)
+        return shutil.which(name) or next((p for p in POSIX_TOOL_PATHS.get(name, []) if os.access(p, os.X_OK)), None)
     found = windows_program(name, os.environ.get("PATH", ""))
     if found:
         return found
@@ -791,7 +800,8 @@ def find_custom_engine(project_dir, association):
 # ##############################
 # Caches, dependencies and tool folders: skipped wherever they appear.
 ALWAYS_SKIP = {
-    ".git", ".svn", ".hg", ".bzr", ".plastic", ".vs", ".idea", ".vscode",
+    ".git", ".svn", ".hg", ".bzr", ".plastic", "_darcs", ".jj", ".sl", ".pijul", "_mtn", "{arch}", ".arch-ids", ".lore",
+    ".diversion", ".jazz5", ".sbas", ".sgdrawer", "$tf", ".$tf", "_sgvault", "sccs", ".vs", ".idea", ".vscode",
     "node_modules", "bower_components", "jspm_packages", ".yarn", ".pnpm-store",
     ".next", ".nuxt", ".output", ".svelte-kit", ".turbo", ".parcel-cache", ".vercel", ".cache",
     "__pycache__", ".venv", "venv", ".tox", ".nox", ".eggs", "site-packages",
@@ -1181,8 +1191,23 @@ def meta_guid(path):
 # non-blank line of them, as of every language; scc and jscpd are told to read them as that known
 # language (scc's name for it, jscpd's), "text" (the default) as plain text.
 EXTRA_CODE = {}
-LIKE_LANGUAGES = {"text": ("Plain Text", "txt"), "C": ("C", "c"), "Ada": ("Ada", "ada"), "SQL": ("SQL", "sql"),
-                  "Lisp": ("Lisp", "lisp"), "Python": ("Python", "python"), "Pascal": ("Pascal", "pascal")}
+LIKE_LANGUAGES = {"text": ("Plain Text", "txt"), "C": ("C", "c"), "C++": ("C++", "cpp"), "Ada": ("Ada", "ada"),
+                  "SQL": ("SQL", "sql"), "Lisp": ("Lisp", "lisp"), "Python": ("Python", "python"),
+                  "Pascal": ("Pascal", "pascal"), "Lua": ("Lua", "lua"), "Visual Basic": ("Visual Basic", "visual-basic")}
+
+# Code this script counts that the pinned scc doesn't recognise (it skips the files) and jscpd
+# doesn't read: extension -> the known language whose comments it shares (LIKE_LANGUAGES). When
+# the studio's own code has some, scc and jscpd are told to read them as that language, as with
+# --code-ext, so the standard measures include them, and the report says so. Not Visual Basic 6's
+# form and control files (.frm, .ctl ...): read whole, their designer section would count as code.
+UNRECOGNISED_CODE = {
+    ".rpy": "Python", ".rpym": "Python", ".verse": "Python",                     # Ren'Py, Verse: # comments
+    ".ink": "C", ".sk": "C", ".nut": "C", ".agc": "C", ".pl1": "C", ".pli": "C",   # // or /* */ comments
+    ".cg": "C", ".cginc": "C", ".compute": "C", ".fx": "C", ".fxh": "C", ".gdshader": "C", ".gdshaderinc": "C",
+    ".glslinc": "C", ".hlsl": "C", ".psh": "C", ".shader": "C", ".usf": "C", ".ush": "C",   # shaders
+    ".tcc": "C++", ".moon": "Lua", ".dpr": "Pascal", ".tsql": "SQL", ".nani": "Lisp",       # Naninovel: ; comments
+    ".bmx": "Visual Basic", ".monkey": "Visual Basic", ".monkey2": "Visual Basic", ".vbs": "Visual Basic",   # ' comments
+    ".rpgle": "text", ".sqlrpgle": "text", ".tw": "text", ".twee": "text"}
 
 
 def add_code_extension(spec):
@@ -1980,12 +2005,59 @@ REVIEWS_IN_MESSAGE = {
     "Phabricator code reviews": re.compile(r"^Differential Revision: \S*?D(\d+)", re.M),
     "Perforce Swarm code reviews": re.compile(r"#review-(\d+)"),
 }
-# History brought into Git from another system, one marker per original change.
-IMPORTED_HISTORY = {
-    "Perforce changelists imported (git-p4)": re.compile(r"\[git-p4: depot-paths = .*?: change = (\d+)\]"),
-    "SVN revisions imported (git-svn)": re.compile(r"^git-svn-id: (\S+)", re.M),
-    "TFS changesets imported (git-tfs)": re.compile(r"^git-tfs-id: (.+)$", re.M),
-}
+# History brought in from another system: what conversion tools write into each converted
+# change's message. (label, pattern, the system it came from, the group naming the original change
+# there or None). Each original change counts once.
+IMPORTED_HISTORY = [
+    ("Perforce changelists imported (git-p4)", re.compile(r"\[git-p4: depot-paths = .*?: change = (\d+)"), "Perforce", 1),
+    ("Perforce changelists imported (p4-fusion)", re.compile(r"\[p4-fusion: depot-paths = .*?: change = (\d+)\]"),
+     "Perforce", 1),
+    ("Perforce changelists copied to Git by Git Fusion", re.compile(r"^Copied from Perforce[ \t]*\r?\n[ \t]*Change: (\d+)",
+                                                                    re.M), "Perforce", 1),
+    ("SVN revisions imported (git-svn)", re.compile(r"^git-svn-id: \S+?@(\d+)(?=\s|$)", re.M), "SVN", 1),
+    ("SVN revisions imported (svn2git --add-metadata)", re.compile(r"^svn path=.*?; revision=(\d+)", re.M), "SVN", 1),
+    ("TFS changesets imported (git-tfs)", re.compile(r"^git-tfs-id: .+?;C(\d+)[ \t]*\r?$", re.M), "Team Foundation (TFVC)", 1),
+    ("Git commits pushed to Perforce through Git Fusion", re.compile(r"^Imported from Git[ \t]*\r?$(?:\n[ \t].*)*?\n[ \t]+sha1: "
+                                                                     r"([0-9a-f]{40})", re.M), "Git", 1),
+    ("SourceSafe check-ins converted to TFS (VSSConverter)", re.compile(
+        r"\A\s*\{\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4} \d{1,2}[.:]\d\d(?:[.:]\d\d)?(?: ?[AaPp]\.?[Mm]\.?)?\}"), "Visual SourceSafe", None),
+    ("SourceSafe file versions converted (VSSMigrate)", re.compile(r"\(vss \d+\)\s*\Z"), "Visual SourceSafe", None),
+    ("commits made up by cvs2svn while converting from CVS", re.compile(
+        r"^This commit was (?:manufactured|generated) by cvs2svn\b|^Standard project directories initialized by cvs2svn\.",
+        re.M), "CVS", None),
+    ("Mercurial changesets converted with hg-git", re.compile(r"^--HG--[ \t]*\r?$", re.M), "Mercurial", None),
+    ("Bazaar revisions converted with Breezy (--BZR--)", re.compile(r"^--BZR--[ \t]*\r?$", re.M), "Bazaar", None),
+    ("changes converted with reposurgeon (Legacy-ID)", re.compile(r"^Legacy-ID: (\S+)[ \t]*\r?$", re.M | re.I), None, 1),
+]
+# Lines conversion tools add, which aren't the change's own message, and what they put before it.
+CONVERSION_LINE = re.compile(r"^(git-svn-id|git-tfs-id|git-tfs-work-item|legacy-id): |^\[(git-p4|p4-fusion): |^svn path=.*; revision="
+                             r"|^--(HG|BZR)--$", re.I)
+CONVERSION_PREFIX = re.compile(r"\A\s*\{\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4} [^}\n]{4,16}\}\s*")   # VSSConverter's date
+CONVERSION_AFFIXES = re.compile(r"^\d+ - (?=.)|\s*\(vss \d+\)$")   # p4-fusion's changelist, VSSMigrate's file version
+EMPTY_MESSAGES = {"", "*** empty log message ***", "(no message)", "no message", "no comment", "(no comment)",
+                  "<no comment>", "none", "-", "."}
+
+
+def message_key(message):
+    """A change's message as converting it to another system leaves it: its first line of its own
+    (without the lines and prefixes conversion tools add), in lower case, spaces collapsed. "" for
+    a message that says nothing."""
+    for line in CONVERSION_PREFIX.sub("", message, count=1).splitlines():
+        line = line.strip()
+        if line and not CONVERSION_LINE.match(line):
+            break
+    else:
+        return ""
+    key = " ".join(CONVERSION_AFFIXES.sub("", line).lower().split()).rstrip(".!")
+    return "" if key in EMPTY_MESSAGES else key[:200]
+
+
+# One change in a history, for telling the same change apart in another system's history (see
+# across_systems). date: "YYYY-MM-DD", a year, or ""; id: its number or hash in its own system
+# (SVN revision, Perforce changelist, Git commit ...) or None; key: message_key of its message;
+# origins: ((system, number or None), ...) the change it was converted from, as markers name it;
+# standard: whether forms count it (main branch, no merges or reverts), or None if unknown.
+Change = namedtuple("Change", "date id key origins standard")
 
 
 class MessageScan:
@@ -1994,18 +2066,28 @@ class MessageScan:
     def __init__(self):
         self.prs, self.reviews, self.imported = defaultdict(set), defaultdict(set), defaultdict(set)
         self.reverts = self.merges = 0   # changes whose first line says so (forms leave both out)
+        self.n = 0
 
     def add(self, message):
+        """Notes what the message names. (message_key, origins, whether forms leave the change out
+        for its message: a merge or a revert)."""
+        self.n += 1
         subject = message.strip().split("\n", 1)[0]
-        self.reverts += bool(re.search("revert", subject, re.I))
-        self.merges += bool(re.match(r"merg(e|ed|ing)\b", subject, re.I))
+        revert, merge = bool(re.search("revert", subject, re.I)), bool(re.match(r"merg(e|ed|ing)\b", subject, re.I))
+        self.reverts += revert
+        self.merges += merge
         self.prs["#"].update(PR_IN_SUBJECT.findall(subject))
         for numbering, pattern in PR_IN_MESSAGE:
             self.prs[numbering].update(pattern.findall(message))
         for label, pattern in REVIEWS_IN_MESSAGE.items():
             self.reviews[label].update(pattern.findall(message))
-        for label, pattern in IMPORTED_HISTORY.items():
-            self.imported[label].update(pattern.findall(message))
+        origins = []
+        for label, pattern, vcs, group in IMPORTED_HISTORY:
+            m = pattern.search(message)
+            if m:
+                self.imported[label].update(pattern.findall(message) if group else [self.n])
+                origins.append((vcs, m.group(group) if group else None))
+        return message_key(message), tuple(origins), revert or merge
 
     def reviews_found(self):
         return ([("merged pull requests named in commit messages", sum(len(s) for s in self.prs.values()))]
@@ -2019,11 +2101,33 @@ class MessageScan:
 # Summing up a history
 # ##############################
 
-def history(vcs, unit, changes, merges=None, reviews=(), notes=(), scan=None):
+# When each system was first released: a change dated before then was converted from an earlier one.
+SYSTEM_RELEASED = {"CVS": ("1986-07-01", "1986"), "Visual SourceSafe": ("1994-01-01", "1994"),
+                   "Perforce": ("1995-01-01", "1995"), "SVN": ("2000-10-20", "October 2000"),
+                   "Darcs": ("2003-03-03", "March 2003"), "Team Foundation (TFVC)": ("2004-01-01", "2004"),
+                   "Bazaar": ("2005-03-26", "March 2005"), "Git": ("2005-04-07", "April 2005"),
+                   "Mercurial": ("2005-04-19", "April 2005"), "Plastic SCM": ("2006-01-01", "2006"),
+                   "Fossil": ("2007-07-21", "July 2007")}
+
+
+def before(date, day):
+    """Is date ("YYYY-MM-DD", or a year) before day ("YYYY-MM-DD")? A year only if it's an earlier year."""
+    return bool(date) and (date[:4] < day[:4] if len(date) == 4 else date < day)
+
+
+def dated_before_row(vcs, dates):
+    """The report row for changes dated before their system existed, or None."""
+    day, when = SYSTEM_RELEASED.get(vcs, (None, None))
+    n = sum(1 for d in dates if before(d, day)) if day else 0
+    return (f"dated before {vcs} existed ({when}): converted from an earlier system", n) if n else None
+
+
+def history(vcs, unit, changes, merges=None, reviews=(), notes=(), scan=None, records=None):
     """A version-control history for the report. changes: [(date "YYYY-MM-DD" or year, author)], the
     author being a tuple of identities (see count_people) or a plain name. scan: the MessageScan of
     their messages, for the changes forms count (without merges or reverts; a system that doesn't
-    record merges has the ones its messages name left out)."""
+    record merges has the ones its messages name left out), and the history they say was imported.
+    records: a Change for each of changes, in the same order, for matching them in other systems."""
     dates = sorted(d for d, _ in changes if d)
     authors = [a if isinstance(a, tuple) else (a,) for _, a in changes]
     shares = people_shares(authors)
@@ -2037,9 +2141,13 @@ def history(vcs, unit, changes, merges=None, reviews=(), notes=(), scan=None):
     per_year = Counter(d[:4] for d in dates if re.match(r"\d{4}", d))
     # "authors" stays in memory, to count people across repositories; reports never name anyone
     standard = None if scan is None else max(0, len(changes) - (scan.merges if merges is None else merges) - scan.reverts)
-    return {"vcs": vcs, "rows": rows, "reviews": [(label, n) for label, n in reviews if n], "notes": list(notes),
-            "per_year": dict(sorted(per_year.items())), "dates": dates, "authors": sorted(set(authors)),
-            "standard_commits": standard}
+    if scan is not None and vcs != "Git":   # Git adds these after rows of its own
+        rows += scan.imports_found()
+        rows += [r for r in [dated_before_row(vcs, dates)] if r]
+    return {"vcs": vcs, "unit": unit, "rows": rows, "reviews": [(label, n) for label, n in reviews if n],
+            "notes": list(notes), "per_year": dict(sorted(per_year.items())), "dates": dates,
+            "authors": sorted(set(authors)), "standard_commits": standard,
+            "records": records or [Change(d, None, "", (), None) for d, _ in changes]}
 
 
 # ##############################
@@ -2101,7 +2209,7 @@ def git_history(root):
     limit = [] if whole_repo else ["--full-history", "--", "."]
     # Commits on the main branch (whatever is checked out), as opposed to all branches.
     on_main = set((run(["git", "rev-list", "HEAD", *limit], root) or "").split())
-    changes, merges, epic_commits, main_commits, vss_messages = [], 0, 0, 0, 0
+    changes, records, merges, epic_commits, main_commits, vss_messages = [], [], 0, 0, 0, 0
     scan = MessageScan()
     for sha, date, name, email, parents, body in git_log(root, limit):
         progress(f"Reading the Git history of {os.path.basename(root)}: {len(changes) + epic_commits:,} commits")
@@ -2112,7 +2220,8 @@ def git_history(root):
         main_commits += sha in on_main
         if len(parents.split()) > 1:
             merges += 1
-        scan.add(body)
+        key, origins, _ = scan.add(body)
+        records.append(Change(date, sha, key, origins, None))
         vss_messages += bool(VSS_IN_MESSAGE.search(body))
     progress()
     if not changes and not epic_commits:
@@ -2140,26 +2249,65 @@ def git_history(root):
     notes = []
     if (run(["git", "rev-parse", "--is-shallow-repository"], root, 60) or "").strip() == "true":
         notes.append("This is a shallow clone: older history is missing. Run \"git fetch --unshallow\" first.")
-    h = history("Git", "commits by the studio (not Epic's)" if epic_commits else "commits", changes, merges, found,
-                notes)
     standard = git_standard_commits(root, [] if whole_repo else ["--", "."])
-    h["standard_commits"], h["standard_branch"] = standard or (None, None)
+    counted = standard[2] if standard else None
+    records = [r._replace(standard=None if counted is None else r.id in counted) for r in records]
+    h = history("Git", "commits by the studio (not Epic's)" if epic_commits else "commits", changes, merges, found,
+                notes, records=records)
+    h["standard_commits"], h["standard_branch"] = standard[:2] if standard else (None, None)
     h["rows"].insert(1, ("  of which on the main branch (the one checked out)", main_commits))
-    h["rows"] += scan.imports_found()
+    h["rows"] += scan.imports_found() + git_conversion_traces(root)
     h["vss_messages"] = vss_messages
 
     # ####################
     # History from elsewhere: earlier systems, Epic's engine
     # ####################
-    pre_git = sum(1 for d in h["dates"] if d < GIT_RELEASED)
-    if pre_git:
-        h["rows"].append(("dated before Git existed (April 2005): converted from an earlier system", pre_git))
+    h["rows"] += [r for r in [dated_before_row("Git", h["dates"])] if r]
     if epic_commits:
         h["rows"].insert(0, ("commits from Epic (Unreal Engine's own history)", epic_commits))
         h["rows"] += changes_to_epic_code(root, [] if whole_repo else ["--", "."])
     elif is_engine_repository(root) or is_engine_repository(top or root):
         h["rows"] += engine_changes_without_epic_history(root, [] if whole_repo else ["--", "."])
     return h
+
+
+# ####################
+# History converted from other systems, as Git keeps it
+# ####################
+# What conversion tools leave in a repository besides the commit messages (IMPORTED_HISTORY):
+# refs, and files in the .git folder. (ref pattern or file, row label)
+GIT_CONVERSION_REFS = [
+    ("refs/svn/map", "SVN history converted by SubGit (its refs/svn/map)"),
+    ("refs/tags/TFS_C*", "TFS changesets imported (git-tf's TFS_C tags)"),
+    ("refs/cl/", "Perforce changelists imported (p4-fusion's refs/cl)"),
+    ("refs/notes/hg", "Mercurial history converted (git-remote-hg or hg-fast-export: refs/notes/hg)"),
+    ("refs/cinnabar/", "Mercurial history converted by git-cinnabar"),
+]
+GIT_CONVERSION_FILES = [
+    ("svn", "SVN history imported with git-svn (its .git/svn folder)"),
+    ("git-tf", "TFS history imported with git-tf (its .git/git-tf)"),
+    ("hg2git-mapping", "Mercurial history converted by hg-fast-export (its .git/hg2git-mapping)"),
+    ("cvs-revisions", "CVS history imported with git cvsimport (its .git/cvs-revisions)"),
+]
+
+
+def git_conversion_traces(root):
+    """Report rows for the traces conversion tools left outside the commit messages: how many refs
+    they made (one per original change, for tags and refs/cl), or "found"."""
+    import fnmatch
+    refs = (run(["git", "for-each-ref", "--format=%(refname)", *(p.rstrip("/") for p, _ in GIT_CONVERSION_REFS)],
+                root, 120) or "").split()
+    rows = []
+    for pattern, label in GIT_CONVERSION_REFS:
+        n = sum(1 for ref in refs if fnmatch.fnmatchcase(ref, pattern) or (pattern.endswith("/") and ref.startswith(pattern))
+                or ref == pattern)
+        if n:
+            rows.append((label, n if pattern.endswith(("*", "/cl/")) else "found"))
+    git_dir = (run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], root, 60)   # Git 2.31 and later
+               or run(["git", "rev-parse", "--absolute-git-dir"], root, 60) or "").strip()
+    if git_dir:
+        rows += [(label, "found") for name, label in GIT_CONVERSION_FILES if os.path.exists(os.path.join(git_dir, name))]
+    return rows
 
 
 # ####################
@@ -2337,18 +2485,19 @@ def git_default_branch(root):
 
 
 def git_standard_commits(root, pathspec):
-    """(commits, branch): forms' "git log --oneline --no-merges | grep -v -i revert | wc -l" on the
-    main branch, leaving out Epic's own commits in a fork of Unreal Engine. None if git fails."""
+    """(commits, branch, {their hashes}): forms' "git log --oneline --no-merges | grep -v -i revert |
+    wc -l" on the main branch, leaving out Epic's own commits in a fork of Unreal Engine. None if git
+    fails."""
     ref = git_default_branch(root)
-    out = run(["git", "log", "--no-merges", "--invert-grep", "-E", "--grep", EPIC_GREP, "--format=%ae%x1f%s", ref,
+    out = run(["git", "log", "--no-merges", "--invert-grep", "-E", "--grep", EPIC_GREP, "--format=%H%x1f%ae%x1f%s", ref,
                *(pathspec or ["--"])], root, 3600)
     if out is None:
         return None
-    count = sum(1 for line in out.splitlines() if "\x1f" in line and not EPIC_EMAIL.search(line.split("\x1f")[0])
-                and not re.search("revert", line.split("\x1f", 1)[1], re.I))
+    counted = {fields[0] for fields in (line.split("\x1f", 2) for line in out.splitlines())
+               if len(fields) == 3 and not EPIC_EMAIL.search(fields[1]) and not re.search("revert", fields[2], re.I)}
     if ref == "HEAD":   # no main branch: the one checked out
-        return count, (run(["git", "rev-parse", "--abbrev-ref", "HEAD"], root, 60) or "HEAD").strip()
-    return count, re.sub(r"^refs/(heads|remotes)/", "", ref)
+        return len(counted), (run(["git", "rev-parse", "--abbrev-ref", "HEAD"], root, 60) or "HEAD").strip(), counted
+    return len(counted), re.sub(r"^refs/(heads|remotes)/", "", ref), counted
 
 
 # ##############################
@@ -2363,14 +2512,17 @@ def perforce_history(root):
     if not (run(["p4", "changes", "-m", "1", "-s", "submitted", path], root, 20) or "").startswith("Change "):
         return None
     out = run(["p4", "changes", "-l", "-s", "submitted", path], root) or ""
-    changes, scan = [], MessageScan()
-    # "Change 123 on 2020/01/02 by jane@workspace", then the full description, indented.
+    changes, records, scan = [], [], MessageScan()
+    # "Change 123 on 2020/01/02 by jane@workspace", then the full description, indented by a tab.
     for block in re.split(r"^(?=Change \d+ on )", out, flags=re.M):
-        m = re.match(r"Change \d+ on (\d{4}/\d\d/\d\d) by ([^@\s]+)@\S*(.*)", block, re.S)
+        m = re.match(r"Change (\d+) on (\d{4}/\d\d/\d\d) by ([^@\s]+)@\S*(.*)", block, re.S)
         if m:
-            changes.append((m.group(1).replace("/", "-"), m.group(2)))
-            scan.add(m.group(3))
-    return history("Perforce", "submitted changelists", changes, reviews=scan.reviews_found(), scan=scan) if changes else None
+            date = m.group(2).replace("/", "-")
+            changes.append((date, m.group(3)))
+            key, origins, left_out = scan.add(re.sub(r"^\t", "", m.group(4), flags=re.M))
+            records.append(Change(date, m.group(1), key, origins, not left_out))
+    return history("Perforce", "submitted changelists", changes, reviews=scan.reviews_found(), scan=scan,
+                   records=records) if changes else None
 
 
 def svn_history(root):
@@ -2384,15 +2536,17 @@ def svn_history(root):
     import xml.etree.ElementTree as ET
     try:
         entries = ET.fromstring(out).iter("logentry")
-        changes, scan = [], MessageScan()
+        changes, records, scan = [], [], MessageScan()
         for e in entries:
-            changes.append(((e.findtext("date") or "")[:10], e.findtext("author") or "(no author)"))
-            scan.add(e.findtext("msg") or "")
+            date = (e.findtext("date") or "")[:10]
+            changes.append((date, e.findtext("author") or "(no author)"))
+            key, origins, left_out = scan.add(e.findtext("msg") or "")
+            records.append(Change(date, e.get("revision"), key, origins, not left_out))
     except ET.ParseError:
         return None
     if not changes:
         return None
-    h = history("SVN", "revisions", changes, reviews=scan.reviews_found(), scan=scan)
+    h = history("SVN", "revisions", changes, reviews=scan.reviews_found(), scan=scan, records=records)
     # Which path was counted: forms count trunk's revisions, not those of every branch.
     path = (run(["svn", "info", "--show-item", "relative-url", "--non-interactive", root], root, 120) or "").strip()
     if path.startswith("^/"):
@@ -2415,36 +2569,87 @@ def hg_skips_repository_settings():
     return bool(m) and (int(m.group(1)), int(m.group(2))) >= HG_SKIPS_REPOSITORY_SETTINGS
 
 
+def hg_converted_from(extras):
+    """(system, its number for the change) that hg convert or hg-git recorded in a changeset's
+    extras, or None. hg convert's convert_revision: "svn:<uuid><path>@<revision>" from SVN, the
+    commit hash from Git, the changelist from Perforce (also in "p4"), a revision id from Bazaar."""
+    rev = extras.get("convert_revision", "")
+    if extras.get("p4"):
+        return "Perforce", extras["p4"]
+    if rev.startswith("svn:"):
+        m = re.search(r"@(\d+)$", rev)
+        return "SVN", m.group(1) if m else None
+    if re.fullmatch(r"[0-9a-f]{40}", rev):
+        return "Git", rev
+    if rev:
+        return None, rev
+    if extras.get("hg-git-rename-source") == "git":   # hg-git, pulling from Git
+        return "Git", None
+    return None
+
+
 def hg_history(root):
     if not hg_skips_repository_settings():
         return None
-    out = run(["hg", "log", "--template",
-               "{date|shortdate}\\x1f{author|person}\\x1f{author|email}\\x1f{p2rev}\\x1f{desc}\\x1e", "."], root)
-    changes, merges, scan = [], 0, MessageScan()
+    out = run(["hg", "log", "--template", "{node}\\x1f{date|shortdate}\\x1f{author|person}\\x1f{author|email}\\x1f"
+               "{p2rev}\\x1f{extras % '{key}={value}\\x1d'}\\x1f{desc}\\x1e", "."], root)
+    # hg-git keeps the Git commit each changeset is: "<git hash> <hg hash>" lines.
+    git_of = {}
+    try:
+        with open(os.path.join(nearest(root, ".hg") or "", "git-mapfile"), encoding="ascii", errors="replace") as f:
+            git_of = {hg: git for git, hg in (line.split() for line in f if len(line.split()) == 2)}
+    except OSError:
+        pass
+    changes, records, merges, converted, scan = [], [], 0, Counter(), MessageScan()
     for record in (out or "").split("\x1e"):
-        fields = record.split("\x1f")
-        if len(fields) == 5:
-            date, name, email, p2, desc = fields
-            changes.append((date.strip(), (name, email)))
+        fields = record.split("\x1f", 6)
+        if len(fields) == 7:
+            node, date, name, email, p2, extras, desc = fields
+            node, date = node.strip(), date.strip()
+            changes.append((date, (name, email)))
             merges += p2.strip() != "-1"
-            scan.add(desc)
-    return history("Mercurial", "commits", changes, merges, scan.reviews_found(), scan=scan) if changes else None
+            key, origins, left_out = scan.add(desc)
+            source = hg_converted_from(dict(e.split("=", 1) for e in extras.split("\x1d") if "=" in e))
+            if source:
+                converted[source[0] or "another system"] += 1
+            origins += tuple(o for o in [source, ("Git", git_of[node]) if node in git_of else None] if o)
+            records.append(Change(date, node, key, origins, not left_out and p2.strip() == "-1"))
+    if not changes:
+        return None
+    h = history("Mercurial", "commits", changes, merges, scan.reviews_found(), scan=scan, records=records)
+    h["rows"] += [(f"changesets converted from {vcs} (hg convert or hg-git)", n) for vcs, n in sorted(converted.items())]
+    if git_of:
+        h["rows"].append(("changesets also in Git (hg-git's .hg/git-mapfile)", sum(1 for r in records if r.id in git_of)))
+    return h
 
 
 def bzr_history(root):
-    """Bazaar, through Breezy (brz) or the original bzr."""
-    out = run(["brz", "log", "--long", "-n0", "."], root)
+    """Bazaar, through Breezy (brz) or the original bzr. Revision ids name the change a revision
+    was converted from: "svn-v4:<uuid>:<path>:<revision>" (bzr-svn), "git-v1:<hash>" (brz git)."""
+    out = run(["brz", "log", "--long", "--show-ids", "-n0", "."], root)
     if out is None:
-        out = run(["bzr", "log", "--long", "-n0", "."], root)
-    changes, scan = [], MessageScan()
+        out = run(["bzr", "log", "--long", "--show-ids", "-n0", "."], root)
+    changes, records, converted, scan = [], [], Counter(), MessageScan()
     for block in re.split(r"^\s*-{20,}\s*$", out or "", flags=re.M):
         if not re.search(r"^\s*revno:", block, re.M):
             continue
         who = re.search(r"^\s*authors?:\s*(.+)$", block, re.M) or re.search(r"^\s*committer:\s*(.+)$", block, re.M)
         when = re.search(r"^\s*timestamp:\s*\w+ (\d{4}-\d\d-\d\d)", block, re.M)
-        changes.append((when.group(1) if when else "", identities(who.group(1).split(",")[0]) if who else ("",)))
-        scan.add(block.split("message:", 1)[-1])
-    return history("Bazaar", "revisions", changes, reviews=scan.reviews_found(), scan=scan) if changes else None
+        revid = re.search(r"^\s*revision-id:\s*(\S+)", block, re.M)
+        date = when.group(1) if when else ""
+        changes.append((date, identities(who.group(1).split(",")[0]) if who else ("",)))
+        key, origins, left_out = scan.add(block.split("message:", 1)[-1])
+        svn = re.match(r"svn-v\d+(?:-\w+)?:[^:]*:.*:(\d+)$", revid.group(1)) if revid else None
+        git = re.match(r"git-v\d+:([0-9a-f]{40})$", revid.group(1)) if revid else None
+        if svn or git:
+            converted["SVN" if svn else "Git"] += 1
+            origins += (("SVN", svn.group(1)) if svn else ("Git", git.group(1)),)
+        records.append(Change(date, revid.group(1) if revid else None, key, origins, not left_out))
+    if not changes:
+        return None
+    h = history("Bazaar", "revisions", changes, reviews=scan.reviews_found(), scan=scan, records=records)
+    h["rows"] += [(f"revisions converted from {vcs} (their revision ids say so)", n) for vcs, n in sorted(converted.items())]
+    return h
 
 
 def darcs_history(root):
@@ -2459,23 +2664,34 @@ def darcs_history(root):
         patches = list(ET.fromstring(out[out.index("<changelog"):]).iter("patch"))
     except ET.ParseError:
         return None
-    changes, scan = [], MessageScan()
+    changes, records, scan = [], [], MessageScan()
     for p in patches:
         d = p.get("date", "")
-        changes.append((f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) >= 8 else "", identities(p.get("author", ""))))
-        scan.add((p.findtext("name") or "") + "\n" + (p.findtext("comment") or ""))
-    return history("Darcs", "patches", changes, reviews=scan.reviews_found(), scan=scan) if changes else None
+        date = f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) >= 8 else ""
+        changes.append((date, identities(p.get("author", ""))))
+        key, origins, left_out = scan.add((p.findtext("name") or "") + "\n" + (p.findtext("comment") or ""))
+        records.append(Change(date, p.get("hash"), key, origins, not left_out))
+    return history("Darcs", "patches", changes, reviews=scan.reviews_found(), scan=scan,
+                   records=records) if changes else None
 
 
 def fossil_history(root):
     out = run(["fossil", "timeline", "-n", "0", "-t", "ci", "-W", "0", "-p", ".", "-F", "%H|%a|%d|%c"], root)
-    changes, scan = [], MessageScan()
+    changes, records, scan = [], [], MessageScan()
     for line in (out or "").splitlines():
         fields = line.split("|", 3)
         if len(fields) == 4 and re.fullmatch(r"[0-9a-f]{20,}", fields[0]) and fields[3] != "initial empty check-in":
             changes.append((fields[2][:10], fields[1]))
-            scan.add(fields[3])
-    return history("Fossil", "check-ins", changes, reviews=scan.reviews_found(), scan=scan) if changes else None
+            key, origins, left_out = scan.add(fields[3])
+            records.append(Change(fields[2][:10], fields[0], key, origins, not left_out))
+    if not changes:
+        return None
+    h = history("Fossil", "check-ins", changes, reviews=scan.reviews_found(), scan=scan, records=records)
+    # fossil import --svn tags each check-in with its SVN revision (--rev-tags, implied by -i).
+    svn_tags = sum(1 for tag in (run(["fossil", "tag", "list"], root, 120) or "").split() if re.fullmatch(r"svn-rev-\d+", tag))
+    if svn_tags:
+        h["rows"].append(("SVN revisions imported (fossil import's svn-rev tags)", svn_tags))
+    return h
 
 
 def cvs_history(root):
@@ -2491,41 +2707,93 @@ def cvs_history(root):
         cid = re.search(r"commitid: (\w+)", info)
         key = cid.group(1) if cid else (author, date, minute, message.strip())
         commits[key] = (date.replace("/", "-"), author.strip(), message)
-    scan = MessageScan()
-    for _, _, message in commits.values():
-        scan.add(message)
+    scan, records = MessageScan(), []
+    for date, _, message in commits.values():
+        key, origins, left_out = scan.add(message)
+        records.append(Change(date, None, key, origins, not left_out))
     changes = [(date, author) for date, author, _ in commits.values()]
-    return history("CVS", "commits", changes, reviews=scan.reviews_found(), scan=scan) if changes else None
+    return history("CVS", "commits", changes, reviews=scan.reviews_found(), scan=scan,
+                   records=records) if changes else None
 
 
 def tfvc_history(root):
-    """Team Foundation Version Control (Azure DevOps / TFS), through Visual Studio's tf command."""
+    """Team Foundation Version Control (Azure DevOps / TFS), through Visual Studio's tf command. The
+    brief format cuts comments short, so they're read for what conversion tools put at their start
+    (SourceSafe's dates, from VSSConverter), not matched with other systems' messages."""
     flag = "/" if os.name == "nt" else "-"
     out = run(["tf", "history", ".", f"{flag}recursive", f"{flag}noprompt", f"{flag}format:brief"], root)
-    changes = []
+    changes, records, scan = [], [], MessageScan()
     for line in (out or "").splitlines():
-        m = re.match(r"^\s*(\d+)\s+(.+?)\s{2,}(\S+)", line)   # changeset, user, date (in the local format)
+        m = re.match(r"^\s*(\d+)\s+(.+?)\s{2,}(\S+)(?:\s+(.*))?$", line)   # changeset, user, date (in the local format), comment
         if m:
             year = re.search(r"\d{4}", m.group(3))
             changes.append((year.group(0) if year else "", m.group(2).strip()))
-    return history("Team Foundation (TFVC)", "changesets", changes) if changes else None
+            _, origins, _ = scan.add(m.group(4) or "")
+            records.append(Change(changes[-1][0], m.group(1), "", origins, None))
+    if not changes:
+        return None
+    h = history("Team Foundation (TFVC)", "changesets", changes, records=records)
+    h["rows"] += scan.imports_found() + [r for r in [dated_before_row(h["vcs"], h["dates"])] if r]
+    return h
+
+
+def cm_find(root, query, fields, dated=False):
+    """Records of cm find (Plastic SCM): [[field, ...]] for each object, or None if cm fails. Fields
+    are split by control characters, as comments can hold any other character. With dated, dates
+    come in ISO form (--dateformat=o), not in the computer's own format, unless this cm is too old
+    to take the option."""
+    fmt = "--format=" + "\x1f".join("{%s}" % f for f in fields) + "\x1e"
+    out = None
+    if dated:
+        out = run(["cm", "find", *query, fmt, "--dateformat=o", "--nototal", "--encoding=utf-8"], root)
+    if out is None:
+        out = run(["cm", "find", *query, fmt, "--nototal"], root)
+    if out is None:
+        return None
+    records = (r.lstrip("\r\n").split("\x1f", len(fields) - 1) for r in out.split("\x1e"))
+    return [r for r in records if len(r) == len(fields)]
+
+
+def plastic_date(text):
+    """A date as cm find prints it: "YYYY-MM-DD" from its ISO form; otherwise (the computer's own
+    format, so day and month may be either way round) only the year."""
+    text = text.strip()
+    if re.match(r"\d{4}-\d\d-\d\d", text):
+        return text[:10]
+    return (re.findall(r"\d{4}", text) or [""])[0]
 
 
 def plastic_history(root):
-    """Plastic SCM (Unity Version Control): changesets, and code reviews (its pull requests)."""
-    out = run(["cm", "find", "changeset", "--format={date}|{owner}|{comment}", "--nototal"], root)
-    rows = [line.split("|", 2) for line in (out or "").splitlines() if "|" in line]
-    if not rows:
+    """Plastic SCM (Unity Version Control): the changesets of the workspace's repository (all its
+    branches), its merges, and its code reviews (Plastic's pull requests). cm asks the server."""
+    found = cm_find(root, ["changeset"], ["changesetid", "date", "owner", "branch", "comment"], dated=True)
+    if not found:
         return None
-    # Plastic prints dates in the computer's local format, so only the year is reliable.
-    changes = [((re.findall(r"\d{4}", r[0]) or [""])[0], r[1]) for r in rows]
-    scan = MessageScan()
-    for r in rows:
-        scan.add(r[2] if len(r) > 2 else "")
+    # Changeset 0 is the empty one every repository starts with.
+    found = [r for r in found if r[0].strip() != "0"]
+    if not found:
+        return None
+    merged_into = cm_find(root, ["merge", "where type = 'merge'"], ["dstchangeset"])   # cherry-picks aren't merges
+    merge_ids = {m.group(0) for m in (re.search(r"\d+", r[0]) for r in merged_into or []) if m}
+    changes, records, scan = [], [], MessageScan()
+    on_main = 0
+    for cid, date, owner, branch, comment in found:
+        cid, date, branch = cid.strip(), plastic_date(date), branch.strip()
+        changes.append((date, owner.strip()))
+        key, origins, left_out = scan.add(comment)
+        merge = cid in merge_ids
+        main = branch == "/main"
+        records.append(Change(date, cid, key, origins, main and not merge and not left_out))
+        on_main += main
     reviews = run(["cm", "find", "review", "--format={id}", "--nototal"], root)
     review_count = len([line for line in (reviews or "").splitlines() if line.strip()])
-    return history("Plastic SCM", "changesets", changes,
-                   reviews=[("Plastic code reviews", review_count)] + scan.reviews_found(), scan=scan)
+    h = history("Plastic SCM", "changesets", changes, len(merge_ids & {r.id for r in records}) if merged_into is not None
+                else None, reviews=[("Plastic code reviews", review_count)] + scan.reviews_found(), scan=scan,
+                records=records)
+    if on_main:   # forms count the main branch's changesets
+        h["rows"].insert(1, ("  of which on the main branch (/main)", on_main))
+        h["standard_commits"], h["standard_branch"] = sum(1 for r in records if r.standard), "/main"
+    return h
 
 
 # ####################
@@ -2599,13 +2867,56 @@ VERSION_CONTROL = [
     ("Fossil", [".fslckout", "_FOSSIL_"], ["fossil"], fossil_history),
     ("CVS", [os.path.join("CVS", "Root")], ["cvs"], cvs_history),
     ("Team Foundation (TFVC)", ["$tf", ".$tf", ".tfignore"], ["tf"], tfvc_history),
-    # Found, but their history can't be read from the command line here.
+    # Found, but their history can't be read from the command line here: their tools need their
+    # server (and a login), or are rarely installed, or would obey the working copy's own settings.
+    ("Jujutsu", [".jj"], [], None),   # beside Git (colocated), its history is Git's
     ("Unity Collaborate", [".collabignore"], [], None),
     ("Visual SourceSafe", ["vssver2.scc", "vssver.scc", "mssccprj.scc"], [], None),
     ("SourceGear Vault", ["_sgvault"], [], None),
+    ("Lore", [".lore", ".loreignore"], [], None),            # Epic's, for games (2026)
+    ("Diversion", [".diversion", ".dvignore"], [], None),     # a cloud system for games
+    ("Sapling", [".sl"], [], None),
+    ("Pijul", [".pijul"], [], None),
+    ("BitKeeper", [os.path.join("BitKeeper", "etc")], [], None),
+    ("Monotone", ["_MTN"], [], None),
+    ("GNU Arch", ["{arch}"], [], None),
+    ("ClearCase", [".view.dat", "view.dat"], [], None),      # a snapshot view's root
+    ("IBM Rational Team Concert (Jazz)", [".jazz5"], [], None),
+    ("Rational Synergy", ["_ccmwaid.inf"], [], None),
+    ("PTC Integrity (MKS)", ["project.pj"], [], None),
+    ("StarTeam", [".sbas"], [], None),
+    ("Surround SCM", [".MySCMServerInfo"], [], None),
+    ("CA Harvest", ["harvest.sig"], [], None),
+    ("Veracity", [".sgdrawer"], [], None),
+    ("RCS", ["RCS"], [], None),     # RCS/ folders of ",v" files beside the files
+    ("SCCS", ["SCCS"], [], None),   # SCCS/ folders of "s." files beside the files
 ]
 # Their markers in a folder, for spotting repositories inside the scanned folder.
 REPOSITORY_MARKERS = {m: name for name, markers, _, _ in VERSION_CONTROL for m in markers if name != "Visual SourceSafe"}
+
+
+def marker_is(path, marker):
+    """Is the file or folder at path (named marker) really that system's? Names that other
+    programs may use too are checked: a ClearCase view.dat names its view, an RCS or SCCS folder
+    holds their history files."""
+    name = os.path.basename(marker)
+    try:
+        if name == "view.dat":
+            with open(path, "rb") as f:
+                head = f.read(8192)
+            return b"view_uuid" in head or b"ws_oid" in head
+        if name in ("RCS", "SCCS"):
+            files = os.listdir(path)[:200]
+            return any(f.endswith(",v") if name == "RCS" else f.startswith("s.") for f in files)
+    except OSError:
+        return False
+    return os.path.exists(path)
+
+
+def marker_found(root, marker):
+    """The marker in root or a folder above it (see find_up), if it's really that system's."""
+    found = nearest(root, marker)
+    return found is not None and marker_is(found, marker)
 PERFORCE_MARKERS = {".p4config", ".p4ignore", "p4config.txt", "p4ignore.txt", ".p4ignore.txt"}
 
 
@@ -2620,10 +2931,12 @@ def version_control(root):
         if name == "Git":
             present = run(["git", "-C", root, "rev-parse"], root, 60) is not None or find_up(root, ".git")
         else:
-            present = any(find_up(root, m) for m in markers)
+            present = any(marker_found(root, m) for m in markers)
         if not present:
             continue
-        if read is None:
+        if name == "Jujutsu" and "Git" in found:
+            found.append("Jujutsu (on top of Git: its history is the Git history)")
+        elif read is None:
             found.append(f"{name} (its history can't be read by this script: please ask for an export)")
         elif not any(tool_path(t) for t in tools):
             found.append(f"{name} (but the {tools[0]} command isn't installed, so no history)")
@@ -2698,6 +3011,244 @@ HISTORY_CAVEATS = [
     "are found only where the hosting service leaves traces in the repository, so ask the studio for the",
     "count on its hosting service (GitHub, GitLab, Azure DevOps, Bitbucket, Perforce Swarm ...).",
 ]
+
+
+# ##############################
+# Projects that moved between systems
+# ##############################
+# A project that moved from one system to another (SourceSafe to SVN to Git, CVS to Mercurial,
+# Perforce to Plastic ...), maybe more than once, often has an older system's history, whole or in
+# part, inside a newer one's too, and may still have both. Before the histories of one folder are
+# added together, each change in more than one of them is found and counted once, in the newest:
+# by the original change a conversion tool's marker names (git-svn's revision, git-p4's changelist,
+# hg convert's ...), by the same message within a couple of days, or by the same long message on any
+# date (some conversions date every change the day they ran). Where messages are too few to go by
+# (SourceSafe's are often empty), the histories are fitted together by their dates.
+SAME_CHANGE_DAYS = 2    # one change's date in two systems differs by time zone, or a conversion run overnight
+DISTINCT_MESSAGE = 24   # characters: a message this long, found once in each history, is the same change
+CONVERTED_SHARE = 0.5   # of the older history's changes in the newer one: it was converted into it
+SAME_WORK_SHARE = 0.1   # of the older history's changes while both were in use: they hold the same work
+COMMON_MESSAGE_TIMES, COMMON_MESSAGE_SHARE = 3, 0.01   # a message more changes than both have says nothing
+SHORT_NAMES = {"Visual SourceSafe": "SourceSafe", "Team Foundation (TFVC)": "TFVC"}
+
+
+def short_name(vcs):
+    return SHORT_NAMES.get(vcs, vcs)
+
+
+def change_unit(h):
+    """What a history's changes are called: "commits", "check-ins", "submitted changelists" ..."""
+    return re.sub(r" \(.*", "", h.get("unit") or "changes")
+
+
+def date_range(date):
+    """(first day, last day) that a date ("YYYY-MM-DD", or a year) stands for."""
+    return (date + "-01-01", date + "-12-31") if len(date) == 4 else (date, date)
+
+
+def day_number(date):
+    """The day as a number, or None for a date that's only a year (or isn't one)."""
+    from datetime import date as day
+    try:
+        return day.fromisoformat(date).toordinal() if len(date) == 10 else None
+    except ValueError:
+        return None
+
+
+def same_changes(old, new):
+    """({old's change: new's change}, how many of them a conversion marker named) for the changes
+    in both histories, as indexes into their records."""
+    a, b = old["records"], new["records"]
+    pairs, taken = {}, set()
+
+    def pair(i, j):
+        pairs[i] = j
+        taken.add(j)
+
+    # ####################
+    # Named by a conversion marker, either way round
+    # ####################
+    a_ids = {r.id: i for i, r in enumerate(a) if r.id}
+    b_ids = {r.id: j for j, r in enumerate(b) if r.id}
+    for j, r in enumerate(b):
+        for vcs, number in r.origins:
+            i = a_ids.get(number) if vcs == old["vcs"] else None
+            if i is not None and i not in pairs and j not in taken:
+                pair(i, j)
+    for i, r in enumerate(a):
+        for vcs, number in r.origins:
+            j = b_ids.get(number) if vcs == new["vcs"] else None
+            if j is not None and i not in pairs and j not in taken:
+                pair(i, j)
+    marked = len(pairs)
+
+    # ####################
+    # The same message, within SAME_CHANGE_DAYS, or in the same year where a date is only the year
+    # ####################
+    # Not messages that many changes have ("fix", "wip"): two teams' histories would share those.
+    a_count, b_count = Counter(r.key for r in a), Counter(r.key for r in b)
+    common = {k for count, n in ((a_count, len(a)), (b_count, len(b))) for k, c in count.items()
+              if c > max(COMMON_MESSAGE_TIMES, COMMON_MESSAGE_SHARE * n)}
+    by_day, by_year = defaultdict(list), defaultdict(list)
+    for j, r in enumerate(b):
+        if r.key and r.date and j not in taken and r.key not in common:
+            n = day_number(r.date)
+            if n is not None:
+                by_day[r.key, n].append(j)
+            by_year[r.key, r.date[:4], n is None].append(j)
+    for i, r in enumerate(a):
+        if i in pairs or not r.key or not r.date or r.key in common:
+            continue
+        n = day_number(r.date)
+        if n is not None:
+            places = [by_day.get((r.key, n + d)) for d in sorted(range(-SAME_CHANGE_DAYS, SAME_CHANGE_DAYS + 1), key=abs)]
+            places.append(by_year.get((r.key, r.date[:4], True)))
+        else:
+            places = [by_year.get((r.key, r.date[:4], True)), by_year.get((r.key, r.date[:4], False))]
+        for bucket in places:
+            while bucket and bucket[-1] in taken:
+                bucket.pop()
+            if bucket:
+                pair(i, bucket.pop())
+                break
+
+    # ####################
+    # The same long message, once in each history, whatever the dates
+    # ####################
+    b_once = {r.key: j for j, r in enumerate(b) if len(r.key) >= DISTINCT_MESSAGE and b_count[r.key] == 1}
+    for i, r in enumerate(a):
+        j = b_once.get(r.key) if a_count[r.key] == 1 else None
+        if j is not None and i not in pairs and j not in taken:
+            pair(i, j)
+    return pairs, marked
+
+
+def how_related(old, new, pairs):
+    """How two histories of one folder fit together, old's starting first: {"kind", "counted":
+    old's changes (indexes) that are counted in new's, "during": old's changes while new was in
+    use, "shared": the share of old's days on which new has changes too, "redated": whether new
+    dated the changes converted from old when the conversion ran}. Kinds: "converted" (new holds
+    old's history), "one after the other", "overlapping" (both in use for a while, for the same
+    work) and "side by side" (both in use, for different work)."""
+    a, b = old["records"], new["records"]
+    lo, hi = date_range(new["dates"][0])[0], date_range(new["dates"][-1])[1]
+    during = {i for i, r in enumerate(a) if r.date and date_range(r.date)[1] >= lo and date_range(r.date)[0] <= hi}
+    old_days = {d for d in old["dates"] if len(d) == 10}
+    shared = len(old_days & set(new["dates"])) / len(old_days) if old_days else 0.0
+    starts = day_number(old["dates"][0]), day_number(new["dates"][0])
+    starts_together = None not in starts and abs(starts[0] - starts[1]) <= 31
+    offsets = sorted(abs(day_number(a[i].date) - day_number(b[j].date)) for i, j in pairs.items()
+                     if day_number(a[i].date) is not None and day_number(b[j].date) is not None)
+    redated = len(offsets) >= 3 and offsets[len(offsets) // 2] > SAME_CHANGE_DAYS
+    matched = set(pairs)
+    out = {"during": during, "shared": shared, "redated": redated}
+    # Dates alone only say something where there are too few messages to go by.
+    with_messages = all(sum(1 for r in h["records"] if r.key) >= len(h["records"]) / 2 for h in (old, new))
+    if len(pairs) >= CONVERTED_SHARE * len(a) or (not with_messages and starts_together and shared >= CONVERTED_SHARE):
+        return dict(out, kind="converted", counted=set(range(len(a))) if redated else matched | during)
+    if date_range(old["dates"][-1])[1] <= lo:
+        return dict(out, kind="one after the other", counted=matched)
+    if not with_messages or len(matched & during) >= SAME_WORK_SHARE * len(during):
+        return dict(out, kind="overlapping", counted=matched | during)
+    return dict(out, kind="side by side", counted=matched)
+
+
+def relation_text(old, new, pairs, marked, rel):
+    """The report's sentence on how old's history fits with new's (see how_related)."""
+    o, n, ou, nu = short_name(old["vcs"]), short_name(new["vcs"]), change_unit(old), change_unit(new)
+    during, n_old = rel["during"], len(old["records"])
+    both_to = min(old["dates"][-1], new["dates"][-1])
+    new_during = sum(1 for r in new["records"] if r.date and date_range(r.date)[0] <= date_range(both_to)[1])
+    alike = len(set(pairs) & during)
+    if rel["kind"] == "converted":
+        if len(pairs) >= CONVERTED_SHARE * n_old:
+            how = ", ".join(part for part in (f"{marked:,} by the conversion tool's markers" if marked else "",
+                                              f"{len(pairs) - marked:,} by their messages" if len(pairs) > marked else "")
+                            if part)
+            why = f"{len(pairs):,} of its {n_old:,} {ou} are in {n} too ({how})"
+        else:
+            why = f"it has {nu} on {100 * rel['shared']:.0f}% of the days with {o} {ou}"
+        text = f"{n} already holds the {o} history: {why}, so the history was converted into {n}."
+        rest = n_old - len(rel["counted"])
+        text += (f" The {n} numbers are the whole history; don't add the {o} {ou} to them." if not rest else
+                 f" {rest:,} of the {o} {ou} are from before or after {n}'s, and aren't in it, so they're added.")
+        if rel["redated"]:
+            text += f" ({n} dates the converted {ou} when the conversion ran, not when they were made.)"
+    elif rel["kind"] == "one after the other":
+        text = f"One after the other: {o} until {old['dates'][-1]}, then {n} from {new['dates'][0]}."
+        if pairs:
+            text += f" {len(pairs):,} of the {o} {ou} are in {n} too, and counted once."
+    elif rel["kind"] == "overlapping":
+        text = (f"Both were in use from {new['dates'][0]} to {both_to}: {o} has {len(during):,} {ou} then, {n}"
+                f" {new_during:,} {nu}.")
+        text += (f" {alike:,} of them have the same message in both, so the same work went into both: that time is"
+                 f" counted once, from {n}." if alike else
+                 f" The same work may be in both, so that time is counted once, from {n}.")
+    else:
+        text = (f"Both were in use from {new['dates'][0]} to {both_to}, for different work: {o}'s {len(during):,}"
+                f" {ou} then have messages unlike {n}'s {new_during:,} {nu}, so both are counted"
+                + (f" ({len(pairs):,} that are in both, once)." if pairs else "."))
+    return text
+
+
+def across_systems(histories):
+    """(report lines, (changes, first, last, how)) for one folder's histories in more than one
+    system (or more than one history of a system), each change counted once; ([], None) for fewer
+    than two. Marks each history: "counted_elsewhere" (its changes counted in a newer one's),
+    "standard_duplicates" (how many of them forms would count) and "held_by" (the system whose
+    history holds all of it)."""
+    import textwrap
+    hs = [h for h in histories if h.get("dates")]
+    if len(hs) < 2:
+        return [], None
+    # Oldest first. Starting the same day, the older system's history was converted into the newer
+    # one's, and Git's is taken as the newest: a mirror of it (Plastic's GitSync ...) is counted in Git.
+    hs.sort(key=lambda h: (date_range(h["dates"][0])[0], h["vcs"] == "Git", SYSTEM_RELEASED.get(h["vcs"], ("9999",))[0]))
+    names = [short_name(h["vcs"]) for h in hs]
+    width = max(len(name) for name in names) + 1
+    out = [f"  {name + ':':<{width}} {len(h['records']):,} {change_unit(h)}, {h['dates'][0]} to {h['dates'][-1]}"
+           for name, h in zip(names, hs)]
+
+    # ####################
+    # Each pair, older first
+    # ####################
+    # Each older history is described with the first newer one that holds its work, or else the next one.
+    counted_elsewhere = [set() for _ in hs]
+    holders = [None] * len(hs)
+    kinds = {}
+    for x, old in enumerate(hs):
+        texts = []
+        for y in range(x + 1, len(hs)):
+            new = hs[y]
+            pairs, marked = same_changes(old, new)
+            rel = how_related(old, new, pairs)
+            kinds[x, y] = rel["kind"]
+            counted_elsewhere[x] |= rel["counted"]
+            texts.append(relation_text(old, new, pairs, marked, rel))
+            if rel["kind"] in ("converted", "overlapping") and rel["counted"] and holders[x] is None:
+                holders[x] = names[y]
+                texts = [texts[-1]]
+        for text in texts[:1]:
+            out += textwrap.wrap(text, 104, initial_indent="  ", subsequent_indent="  ")
+
+    # ####################
+    # All together
+    # ####################
+    total = sum(len(h["records"]) - len(c) for h, c in zip(hs, counted_elsewhere))
+    first, last = min(h["dates"][0] for h in hs), max(h["dates"][-1] for h in hs)
+    out.append(f"  Together{', without counting it twice' if any(counted_elsewhere) else ''}: {total:,} changes from"
+               f" {first} to {last}.")
+    joins = {"converted": ", converted into {}", "one after the other": ", then {}", "overlapping": " and {}, overlapping",
+             "side by side": " and {}, side by side"}
+    how = names[0] + "".join(joins[kinds[y - 1, y]].format(names[y]) for y in range(1, len(hs)))
+    for h, c, holder in zip(hs, counted_elsewhere, holders):
+        h["counted_elsewhere"] = c
+        h["standard_duplicates"] = sum(1 for i in c if h["records"][i].standard)
+        if len(c) == len(h["records"]):
+            h["held_by"] = holder or "a newer system"
+            h["standard_duplicates"] = h.get("standard_commits") or 0
+    title = ", ".join(names[:-1]) + " and " + names[-1] + " together:"
+    return ["", title] + out, (total, first, last, how)
 
 
 def engine_report(engine):
@@ -2848,18 +3399,22 @@ def read_sourcesafe(db):
     # ####################
     labels = sum(1 for r in revisions if r[3] == VSS_LABEL)
     changes = sorted((r for r in revisions if r[3] in VSS_CHANGES), key=lambda r: (r[1].lower(), r[0]))
-    checkins, last = [], None
+    checkins, records, last = [], [], None
     for when, user, comment, _ in changes:
         if last and user.lower() == last[1].lower() and (
                 when - last[0] <= VSS_SAME_CHECKIN or (comment and comment == last[2] and when - last[0] <= VSS_SAME_COMMENT)):
             last = (when, user, comment)
+            if comment and not records[-1].key:   # the check-in's comment, for matching it in other systems
+                records[-1] = records[-1]._replace(key=message_key(comment.decode("cp1252", "replace")))
             continue
         last = (when, user, comment)
         checkins.append((datetime.fromtimestamp(when, timezone.utc).strftime("%Y-%m-%d"), user or "(no name)"))
+        records.append(Change(checkins[-1][0], None, message_key(comment.decode("cp1252", "replace")), (), None))
     notes = []
     if damaged or unreadable:
         notes.append(f"{plural(damaged + unreadable, 'damaged or unreadable record')} in the database left out.")
-    h = history("Visual SourceSafe", "check-ins (revisions grouped by person and time)", checkins, notes=notes)
+    h = history("Visual SourceSafe", "check-ins (revisions grouped by person and time)", checkins, notes=notes,
+                records=records)
     h["rows"][1:1] = [("  file revisions in them", len(changes))]
     h["rows"] += [("labels", labels), ("files and projects in the database", items)]
     return h
@@ -2950,7 +3505,7 @@ class SourceSafe:
 # ##############################
 # SourceSafe and Git together
 # ##############################
-GIT_RELEASED = "2005-04-07"   # Git's first release: a commit dated before it was imported
+GIT_RELEASED = SYSTEM_RELEASED["Git"][0]   # Git's first release: a commit dated before it was imported
 VSS_IN_MESSAGE = re.compile(r"source\s?safe|\bvss\b|vss2git|vssmigrate", re.I)
 
 
@@ -2968,56 +3523,19 @@ def imported_git_history(root, h):
     return out
 
 
-def combined_history(git, vss):
-    """(lines, (changes, first, last, how)) putting a SourceSafe history and a Git history
-    together without counting the same work twice. git and vss are history dicts."""
-    g, v = git["dates"], vss["dates"]
-    if not g or not v:
-        return [], None
-    g_unit = git["rows"][0][0].split(" ")[0]   # "commits"
-    vs, ve, gs, ge = v[0], v[-1], g[0], g[-1]
-    out = [f"  SourceSafe: {len(v):,} check-ins, {vs} to {ve}",
-           f"  Git:        {len(g):,} {g_unit}, {gs} to {ge}"]
-
-    # ####################
-    # How the two fit together
-    # ####################
-    from datetime import date
-    v_days, g_days = set(v), set(g)
-    shared = len(v_days & g_days) / len(v_days)
-    starts_together = abs((date.fromisoformat(gs) - date.fromisoformat(vs)).days) <= 31
-    if starts_together and shared >= 0.5:
-        out += [f"  Git already holds the SourceSafe history: it has commits on {100 * shared:.0f}% of the days with SourceSafe",
-                "  check-ins, so the history was converted into Git. The Git numbers are the whole history; don't add",
-                "  the SourceSafe check-ins to them."]
-        return out, (len(g), gs, ge, "converted into Git")
-    if ve <= gs:
-        out += [f"  One after the other: SourceSafe until {ve}, then Git from {gs}.",
-                f"  Together: {len(v) + len(g):,} changes from {vs} to {ge}."]
-        return out, (len(v) + len(g), vs, ge, "SourceSafe, then Git")
-    both_from, both_to = max(vs, gs), min(ve, ge)
-    v_both = sum(1 for d in v if both_from <= d <= both_to)
-    g_both = sum(1 for d in g if both_from <= d <= both_to)
-    v_alone = sum(1 for d in v if not (both_from <= d <= both_to))
-    out += [f"  Both were in use from {both_from} to {both_to}: SourceSafe has {v_both:,} check-ins then, Git {g_both:,}",
-            f"  {g_unit}. The same work may be in both, so that time is counted once, from Git.",
-            f"  Together, without counting it twice: {v_alone + len(g):,} changes from {min(vs, gs)} to {max(ve, ge)}."]
-    return out, (v_alone + len(g), min(vs, gs), max(ve, ge), "SourceSafe and Git, overlapping")
-
-
 # ##############################
 # Report section
 # ##############################
 
 def sourcesafe_lines(root, vss, git_h, histories, alerts):
-    """The report's SourceSafe part: each database's history (added to histories), how it fits
-    with the Git history, or, when the code was in SourceSafe but the database isn't here, how
-    to include it. Returns (lines, combined), combined being (changes, first, last, how) or None."""
+    """The report's SourceSafe part: each database's history (added to histories, to be fitted
+    together with the others: see across_systems), or, when the code was in SourceSafe but the
+    database isn't here, how to include it."""
 
     # ####################
-    # The databases found, and how they fit with Git
+    # The databases found
     # ####################
-    out, combined = [], None
+    out = []
     found = vss.histories()
     for where in vss.recorded:   # on screen only: a server's name isn't for the report
         if where in vss.on_network:
@@ -3032,9 +3550,6 @@ def sourcesafe_lines(root, vss, git_h, histories, alerts):
         out += ["", "Version control history (Visual SourceSafe database):"] + history_lines(h)
         histories.append(h)
     imported = imported_git_history(root, git_h) if git_h else None
-    if git_h and found:
-        lines, combined = combined_history(git_h, found[0][1])
-        out += ["", "SourceSafe and Git together:"] + lines
 
     # ####################
     # Signs of history that isn't here
@@ -3079,7 +3594,7 @@ def sourcesafe_lines(root, vss, git_h, histories, alerts):
                 "      network locations by itself, so it wasn't read. To include its history, run this again with",
                 "      --network-sourcesafe added, or with --sourcesafe \"<that network folder>\" (the folder was shown",
                 "      on screen, not in this report)."]
-    return out, combined
+    return out
 
 
 # #######################################
@@ -3611,6 +4126,19 @@ def database_code_facts(path, ext, data, lines):
     return found
 
 
+SQL_SERVER_BACKUP_EXTS = {".bak", ".trn"}
+
+
+def is_sql_server_backup(path):
+    """Is this .bak / .trn file a SQL Server backup? Those are in Microsoft Tape Format, which
+    begins with a TAPE block; many other programs name their backup copies .bak."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"TAPE"
+    except OSError:
+        return False
+
+
 def database_file(path, ext, name, category, st, dbcode, dac_packages, lines_by, assets):
     """Counts what's in a database file: an Access database, a SQL Server database file or backup,
     a .dacpac / .bacpac package, or an SSIS package / SSRS report."""
@@ -3629,6 +4157,8 @@ def database_file(path, ext, name, category, st, dbcode, dac_packages, lines_by,
         got["category"] = c
         dbcode.access.append((fmt, compiled, got))   # its code is counted after the walk: see count_access_code
     elif ext in SQL_SERVER_FILES:
+        if ext in SQL_SERVER_BACKUP_EXTS and not is_sql_server_backup(path):
+            return   # some other program's backup copy (an editor's, a game engine's ...), not a database
         if mine:
             dbcode.server_files[SQL_SERVER_FILES[ext]] += 1
             dbcode.server_bytes += st.st_size
@@ -4650,10 +5180,18 @@ def run_tool(name, path, args, cwd, timeout=900):
     return run([path, *args], cwd, timeout)
 
 
-def extra_code_args():
-    """(scc's, jscpd's) options for the languages named with --code-ext."""
+def added_code(unrecognised=()):
+    """The code scc and jscpd are told about: the languages named with --code-ext, and the extensions
+    among unrecognised (see UNRECOGNISED_CODE) that they don't name. {extension: (name, like)}."""
+    added = {ext: (CODE_EXTS[ext], UNRECOGNISED_CODE[ext]) for ext in unrecognised if ext in UNRECOGNISED_CODE}
+    added.update(EXTRA_CODE)
+    return added
+
+
+def extra_code_args(unrecognised=()):
+    """(scc's, jscpd's) options for the code they're told about (see added_code)."""
     scc, formats = [], defaultdict(list)
-    for ext, (name, like) in sorted(EXTRA_CODE.items()):
+    for ext, (name, like) in sorted(added_code(unrecognised).items()):
         scc_like, jscpd_like = LIKE_LANGUAGES[like]
         for variant in sorted({ext, ext.upper()}):
             scc += ["--count-as-pattern", f"*{glob_escape(variant)}:{name}:{scc_like}"]
@@ -4699,16 +5237,21 @@ def left_out_paths(root, transitions, files, kept):
     return sorted(out)
 
 
-def tool_measures(root, leave_out):
+def tool_measures(root, leave_out, unrecognised=()):
     """scc's and jscpd's figures, with the options forms give, for the studio's own code: leave_out
     lists the folders ("folder/**") and files that aren't (see left_out_paths). scc counts the whole
-    folder file by file, so the figure for all of it comes too. ({figures}, {tool: why it wasn't
-    run}, {tool: its report to save, if KEEP_TOOL_REPORTS}). jscpd's own report holds copies of the
-    code, so only its totals are kept (jscpd_summary)."""
+    folder file by file, so the figure for all of it comes too. unrecognised: extensions of the
+    studio's own code that the tools are told to read (see UNRECOGNISED_CODE); scc's figure without
+    them comes too, as the forms' commands give it. ({figures}, {tool: why it wasn't run}, {tool:
+    its report to save, if KEEP_TOOL_REPORTS}). jscpd's own report holds copies of the code, so only
+    its totals are kept (jscpd_summary)."""
     found, missing, reports = {}, {}, {}
     matching = {os.path.normcase(p[:-3] if p.endswith("/**") else p).replace("\\", "/") for p in leave_out}
     matching |= {"**"} if "**" in leave_out else set()
-    scc_extra, jscpd_extra = extra_code_args()
+    scc_extra, jscpd_extra = extra_code_args(unrecognised)
+    told = {ext: [name, like] for ext, (name, like) in added_code(unrecognised).items() if ext not in EXTRA_CODE}
+    if told:
+        found["unrecognised_code_read_as"] = dict(sorted(told.items()))
 
     # ####################
     # scc
@@ -4726,12 +5269,14 @@ def tool_measures(root, leave_out):
                 langs = None
             if not isinstance(langs, list):
                 missing["scc"] = "scc ran, but failed"
-                for figure in ("scc_logical_lines", "scc_whole_folder_logical_lines", "scc_logical_lines_by_language"):
+                for figure in ("scc_logical_lines", "scc_whole_folder_logical_lines", "scc_logical_lines_by_language",
+                               "scc_logical_lines_without_unrecognised"):
                     found.pop(figure, None)
                 break
             files = [(str(lang.get("Name", "")), f) for lang in langs for f in lang.get("Files") or []]
-            own = [(lang, int(f.get("Code", 0))) for lang, f in files
-                   if not is_left_out(re.sub(r"^\.[/\\]", "", str(f.get("Location", ""))), matching)]
+            own_files = [(lang, f) for lang, f in files
+                         if not is_left_out(re.sub(r"^\.[/\\]", "", str(f.get("Location", ""))), matching)]
+            own = [(lang, int(f.get("Code", 0))) for lang, f in own_files]
             if key == "logical":
                 found["scc_logical_lines"] = sum(n for _, n in own)
                 found["scc_whole_folder_logical_lines"] = sum(int(f.get("Code", 0)) for _, f in files)
@@ -4739,6 +5284,10 @@ def tool_measures(root, leave_out):
                 for lang, n in own:
                     by_lang[lang] += n
                 found["scc_logical_lines_by_language"] = dict(by_lang.most_common())
+                if told:
+                    found["scc_logical_lines_without_unrecognised"] = sum(
+                        int(f.get("Code", 0)) for _, f in own_files
+                        if os.path.splitext(str(f.get("Location", "")))[1].lower() not in told)
             else:
                 found["scc_generated_lines"] = sum(n for lang, n in own if lang.endswith("(gen)"))
         else:
@@ -4768,6 +5317,7 @@ def tool_measures(root, leave_out):
             percentage = float(total.get("percentage") or 0)
             found["jscpd_duplication_ratio"] = round(percentage / 100, 4) if percentage == percentage else 0.0
             found["jscpd_duplicated_lines"], found["jscpd_lines"] = total.get("duplicatedLines"), total.get("lines")
+            found["jscpd_by_format"] = jscpd_by_format(text)
             found["jscpd_version"] = version
             if KEEP_TOOL_REPORTS:
                 reports["jscpd"] = jscpd_summary(text)
@@ -4777,6 +5327,21 @@ def tool_measures(root, leave_out):
             shutil.rmtree(out, ignore_errors=True)
             progress()
     return found, missing, reports
+
+
+def jscpd_by_format(text):
+    """jscpd's figures for each kind of file it read (its "formats": python, txt ...), most lines
+    first: {format: {"lines", "duplicated_lines", "duplication_ratio"}}. Counts only."""
+    out = {}
+    for fmt, v in (json.loads(text)["statistics"].get("formats") or {}).items():
+        v = (v or {}).get("total") if "total" in (v or {}) else (v or {})
+        lines, duplicated = v.get("lines"), v.get("duplicatedLines")
+        if not isinstance(lines, int) or not isinstance(duplicated, int):
+            continue
+        out[re.sub(r"[^\w+#.-]", "", str(fmt))[:40]] = {
+            "lines": lines, "duplicated_lines": duplicated,
+            "duplication_ratio": round(duplicated / lines, 4) if lines else 0.0}
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]["lines"]))
 
 
 def jscpd_summary(text):
@@ -4812,17 +5377,22 @@ def standard_measures_report(histories, vcs_found, tools, missing, left_out, own
     # ####################
     # The figures
     # ####################
-    counted = [h for h in histories if h.get("standard_commits") is not None]
-    commits = sum(h["standard_commits"] for h in counted)
-    dates = [d for h in histories for d in h.get("dates", ())]
+    # A history converted into another system's, which is also here, is counted in that one (see
+    # across_systems): it isn't another repository, and its changes aren't counted again.
+    live = [h for h in histories if not h.get("held_by")]
+    counted = [h for h in live if h.get("standard_commits") is not None]
+    commits = sum(max(0, h["standard_commits"] - h.get("standard_duplicates", 0)) for h in counted)
+    twice = sum(h.get("standard_duplicates", 0) for h in counted)
+    dates = [r.date for h in histories for i, r in enumerate(h.get("records", ()))
+             if r.date and i not in h.get("counted_elsewhere", ())]
     before = sum(1 for d in dates if d < AI_ERA)
-    shallow = any("shallow clone" in note for h in histories for note in h.get("notes", ()))
-    if not histories:
+    shallow = any("shallow clone" in note for h in live for note in h.get("notes", ()))
+    if not live:
         delivery = "flat snapshot (no version-control history found)"
-    elif all(h["vcs"] == "Git" for h in histories):
+    elif all(h["vcs"] == "Git" for h in live):
         delivery = "Git, but a shallow clone: its older history is missing" if shallow else "Git, full history"
     else:
-        delivery = (f"{', '.join(sorted({h['vcs'] for h in histories}))}: convert it to Git, or deliver a flat"
+        delivery = (f"{', '.join(sorted({h['vcs'] for h in live}))}: convert it to Git, or deliver a flat"
                     " snapshot")
     where = "; ".join(f"{h['vcs']}" + (f" {h['standard_branch']}" if h.get("standard_branch") else "")
                       for h in counted)
@@ -4858,7 +5428,7 @@ def standard_measures_report(histories, vcs_found, tools, missing, left_out, own
         out.append(f"  {'Duplication ratio (jscpd)':<56} {tools['jscpd_duplication_ratio']:>12.4f}")
     out += [f"  {'Commits on the main branch, without merges or reverts':<56} "
             + (f"{commits:>12,}   ({where})" if counted else f"{'none':>12}"),
-            f"  {'Repositories':<56} {max(1, len(histories)):>12,}",
+            f"  {'Repositories':<56} {max(1, len(live)):>12,}",
             f"  {'Primary language':<56} {language or '?':>12}" + (f"   ({raw})" if raw and raw != language else ""),
             f"  {'History':<56} {delivery}"]
     if dates:
@@ -4870,10 +5440,34 @@ def standard_measures_report(histories, vcs_found, tools, missing, left_out, own
                    " such as libraries, plugins, build output and translations"
                    + (f"; the whole folder has {tools['scc_whole_folder_logical_lines']:,} logical lines)" if scc
                       else ")"))
+    told = tools.get("unrecognised_code_read_as") or {}
+    if told and (scc or jscpd):
+        by_name = defaultdict(list)
+        for ext, (name, like) in told.items():
+            by_name[(name, like)].append(ext)
+        how = "; ".join(f"{', '.join(exts)} as {name}, " + ("every non-blank line counted" if like == "text"
+                                                             else f"with {like}'s comments")
+                        for (name, like), exts in sorted(by_name.items()))
+        which = " and ".join(t for t, ran in (("scc", scc), ("jscpd", jscpd)) if ran)
+        out.append(f"  ({which} {'doesn' if which in ('scc', 'jscpd') else 'don'}'t recognise some of the code, so"
+                   f" {'it was' if which in ('scc', 'jscpd') else 'they were'} told to read it: {how}"
+                   + (f". Without it, as the forms' commands give it: "
+                      f"{tools['scc_logical_lines_without_unrecognised']:,} logical lines)"
+                      if "scc_logical_lines_without_unrecognised" in tools else ")"))
+    formats = tools.get("jscpd_by_format") or {}
+    if jscpd and len(formats) > 1:
+        out.append("  (jscpd by kind of file: " + ", ".join(
+            f"{fmt} {v['duplication_ratio']:.4f} of {plural(v['lines'], 'line')}" for fmt, v in formats.items()) + ")")
     if language and (not scc or database_lines):
         out.append(f"  (primary language from {basis})")
-    if counted and len(counted) < len(histories):
-        out.append(f"  (commits from {len(counted)} of the {len(histories)} histories: the others couldn't be counted)")
+    if counted and len(counted) < len(live):
+        out.append(f"  (commits from {len(counted)} of the {len(live)} histories: the others couldn't be counted)")
+    held = [h for h in histories if h.get("held_by")]
+    if held or twice:
+        out.append("  (" + "; ".join([f"the {short_name(h['vcs'])} history is already in {h['held_by']}'s, so it isn't"
+                                      " counted again" for h in held]
+                                     + ([f"{plural(twice, 'change')} in two systems' histories counted once"] if twice
+                                        else [])) + ")")
 
     # ####################
     # What's not included, and how to include it
@@ -4899,7 +5493,7 @@ def standard_measures_report(histories, vcs_found, tools, missing, left_out, own
              "duplication_ratio": tools["jscpd_duplication_ratio"] if jscpd else None,
              "measured_with": measured or None, "not_measured": missing,
              "commits_main_branch_no_merges_or_reverts": commits if counted else None,
-             "commit_branches": where or None, "repositories": max(1, len(histories)),
+             "commit_branches": where or None, "repositories": max(1, len(live)),
              "primary_language": language, "primary_language_detail": raw,
              "primary_language_from": basis if language else None, "history": delivery,
              "changes_before_" + AI_ERA: [before, len(dates)] if dates else None,
@@ -4951,6 +5545,7 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     deps = Dependencies(root)
     dbcode = DatabaseCode()
     source_lines = Counter()   # own lines read from source files, by language (the rest came from databases)
+    unrecognised = set()       # extensions of the studio's own code that scc and jscpd must be told about
     c_family = Counter()       # own C/C++ lines, as forms name them: "C", "C header", "C++"
     not_own_folders = []    # where the studio's own code gives way to someone else's, or to build output
     unknown_text = defaultdict(lambda: [0, 0])   # text files of unknown kinds among the studio's own: [files, bytes]
@@ -5081,7 +5676,7 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
             for marker, name in REPOSITORY_MARKERS.items():
                 first = marker.split(os.sep)[0]
                 # Old SVN, CVS and SourceSafe put their folder in every folder: only the top one counts.
-                if first in here and os.path.exists(os.path.join(dirpath, marker)) and \
+                if first in here and marker_is(os.path.join(dirpath, marker), marker) and \
                         not os.path.exists(os.path.join(os.path.dirname(dirpath), marker)):
                     nested_repos.append((rel, short_path(dirpath)))
                     break
@@ -5324,6 +5919,8 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                     not_own_files.append(rel_file.replace(os.sep, "/"))
                 if c in ("own", "test"):
                     source_lines[lang] += lines
+                    if ext in UNRECOGNISED_CODE and lines:
+                        unrecognised.add(ext)
                     if lang == "C/C++":
                         c_family[form_language(lang, ext)] += lines
                 if c == "third-party":
@@ -5674,10 +6271,14 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         out += ["", f"Version control history ({h['vcs']}):"] + history_lines(h)
     combined = None
     try:
-        vss_out, combined = sourcesafe_lines(root, vss, git_h, histories, alerts)
-        out += vss_out
+        out += sourcesafe_lines(root, vss, git_h, histories, alerts)
     except Exception as e:
         problems.append(f"reading the SourceSafe history: {describe(e, root)}")
+    try:   # one folder's histories in more than one system: how they fit together, each change counted once
+        lines, combined = across_systems(histories)
+        out += lines
+    except Exception as e:
+        problems.append(f"fitting the histories of the different systems together: {describe(e, root)}")
     if not histories:
         if mtimes and mtimes[1] - mtimes[0] < 86400:
             day = datetime.fromtimestamp(mtimes[0], timezone.utc).strftime("%Y-%m-%d")
@@ -5767,6 +6368,10 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         for h in nested:
             out += [f"  History ({h['vcs']}):"] + history_lines(h, "  ")
             histories.append(h)
+        try:
+            out += ["  " + line if line else line for line in across_systems(nested)[0][1:]]
+        except Exception as e:
+            problems.append(f"fitting the histories of {rel} together: {describe(e, root)}")
     if shown > 10:
         out.append(f"(and {shown - 10} more repositories inside this folder, not listed)")
 
@@ -5808,7 +6413,7 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         if only:
             tools, not_measured, tool_reports = {}, {t: "not run on a single file" for t in TOOL_FIGURES}, {}
         else:
-            tools, not_measured, tool_reports = tool_measures(root, left_out)
+            tools, not_measured, tool_reports = tool_measures(root, left_out, unrecognised)
         not_measured = {tool: scrub(why, root) for tool, why in not_measured.items()}
         section, standard_facts = standard_measures_report(histories, vcs_found, tools, not_measured, left_out,
                                                            own_languages, database_languages)
@@ -5855,13 +6460,14 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     if nodes:
         summary.append(f"  Blueprints and other visual scripting: {nodes:,} nodes")
     if histories:
-        rows, reviews = dict(histories[0]["rows"]), histories[0]["reviews"]
-        unit = next(k for k, _ in histories[0]["rows"] if not k.startswith(" ") and "Epic" not in k)
+        main = next((h for h in histories if not h.get("held_by")), histories[0])   # not one wholly in another
+        rows, reviews = dict(main["rows"]), main["reviews"]
+        unit = next(k for k, _ in main["rows"] if not k.startswith(" ") and "Epic" not in k)
         prs = max([v for k, v in reviews if isinstance(v, int) and "pull request" in k] or [0])
         people = rows["contributors"]
         count = rows[unit]
         unit_word = re.sub(r"s\b", "", unit, count=1) if count == 1 else unit   # "1 commit", "1 submitted changelist"
-        summary.append(f"  History ({histories[0]['vcs']}): {fmt(count)} {unit_word} by {people:,}"
+        summary.append(f"  History ({main['vcs']}): {fmt(count)} {unit_word} by {people:,}"
                        f" {'person' if people == 1 else 'people'}, {rows['first change']} to {rows['last change']};"
                        f" {plural(prs, 'pull request')} found")
     else:
@@ -5896,7 +6502,9 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
             "unreal_coverage": dict(coverage), "unreal_versions": dict(unreal_versions), "assets": dict(assets),
             "version_control": vcs_found,
             "histories": [{"vcs": h["vcs"], "rows": dict(h["rows"]), "reviews": dict(h["reviews"]),
-                           "notes": h.get("notes", [])} for h in histories],
+                           "notes": h.get("notes", []), "changes_counted_in_another_history": len(h.get("counted_elsewhere", ())),
+                           "held_by": h.get("held_by")} for h in histories],
+            "history_across_systems": dict(zip(("changes", "first", "last", "how"), combined)) if combined else None,
             "contributors": {"version_control": people_all if histories else None, "named_in_code": named},
             "dependencies_not_here": {"unknown": unknown_deps, "packages": {k: sorted(v) for k, v in deps.packages.items()},
                                       "missing_includes": dict(deps.missing_includes())},

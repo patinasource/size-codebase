@@ -173,7 +173,7 @@ If some of them are code, run again with `--code-ext`:
 --code-ext ".atg=DMS grammar:Ada"
 ```
 
-The part after `=` is the language's name in the report. In the main table every non-blank line of it counts, as for every language. The optional part after `:` is a known language whose comment syntax it shares: `text` (the default), `C`, `Ada`, `SQL`, `Lisp`, `Python` or `Pascal`. It is passed on to scc (as `--count-as-pattern`, so scc counts its comments as comments; with `text`, every non-blank line is a logical line) and to jscpd (as `--formats-exts`), so the standard measures include these files too. The option can be repeated. A specification it can't read stops the script with an explanation.
+The part after `=` is the language's name in the report. In the main table every non-blank line of it counts, as for every language. The optional part after `:` is a known language whose comment syntax it shares: `text` (the default), `C`, `C++`, `Ada`, `SQL`, `Lisp`, `Python`, `Pascal`, `Lua` or `Visual Basic`. It is passed on to scc (as `--count-as-pattern`, so scc counts its comments as comments; with `text`, every non-blank line is a logical line) and to jscpd (as `--formats-exts`), so the standard measures include these files too. The option can be repeated. A specification it can't read stops the script with an explanation.
 
 ---
 
@@ -299,7 +299,7 @@ It reads every user database that is online, or only those named with `--sql-dat
 
 ### SQL Server data files and backups
 
-`.mdf`, `.ndf`, `.ldf`, `.bak` and `.trn` files are counted, but the code inside them can't be read from the files. The report says so, suggests `--sql-server` or exporting the code, and lists them as data files.
+`.mdf`, `.ndf`, `.ldf`, `.bak` and `.trn` files are counted, but the code inside them can't be read from the files. A `.bak` or `.trn` file counts only if it is in Microsoft Tape Format (it begins with `TAPE`), as SQL Server's backups are; other programs' backup copies (an editor's, a game engine's) are skipped. The report says so, suggests `--sql-server` or exporting the code, and lists them as data files.
 
 ### SSIS and SSRS
 
@@ -441,14 +441,16 @@ The script looks for each system's marker in the scanned folder or any of the si
 | Perforce | `p4` reports submitted changes for the folder; or `.p4config`, `.p4ignore`, `p4config.txt` (or the file `P4CONFIG` names) | `p4 changes -l -s submitted <folder>/...` | submitted changelists |
 | SVN | `.svn` | `svn log --xml -r HEAD:1` (up to the newest revision on the server, not just the checkout's), falling back to the checkout's own history | revisions |
 | Mercurial | `.hg` | `hg log`, ignoring the repository's own settings (Mercurial 5.4 or later; an older one isn't run, and the report says so) | commits (merges from the second parent) |
-| Plastic SCM / Unity Version Control | `.plastic` | `cm find changeset`; code reviews from `cm find review` | changesets |
+| Plastic SCM / Unity Version Control | `.plastic` | `cm find changeset` (all branches, with dates in ISO form, `--dateformat=o`; fields split by control characters, as comments can hold anything), without changeset 0, the empty one every repository starts with; merges from `cm find merge` (not cherry-picks); code reviews from `cm find review` | changesets (on `/main`, for the forms) |
 | Team Foundation (TFVC) | `$tf`, `.$tf`, `.tfignore` | `tf history . /recursive` | changesets |
 | Bazaar | `.bzr` | `brz log`, or `bzr log` | revisions |
 | Fossil | `.fslckout`, `_FOSSIL_` | `fossil timeline` (check-ins only, without the initial empty check-in) | check-ins |
 | Darcs | `_darcs` | `darcs log --xml-output` | patches |
 | CVS | `CVS/Root` | `cvs log`: file revisions grouped into commits by commit id, or, from before CVS had them, by the same author, minute and message | commits |
 | Visual SourceSafe | its database (see below) | read directly from the database files | check-ins |
+| Jujutsu | `.jj` | beside Git (colocated, the default), through Git; otherwise not readable here | |
 | Unity Collaborate, SourceGear Vault | `.collabignore`, `_sgvault` | not readable here; the report asks for an export | |
+| Lore (Epic's, 2026), Diversion, Sapling, Pijul, BitKeeper, Monotone, GNU Arch, ClearCase, Rational Team Concert, Rational Synergy, PTC Integrity (MKS), StarTeam, Surround SCM, CA Harvest, Veracity, RCS, SCCS | `.lore`/`.loreignore`, `.diversion`/`.dvignore`, `.sl`, `.pijul`, `BitKeeper/etc`, `_MTN`, `{arch}`, `.view.dat`/`view.dat` (one naming its view), `.jazz5`, `_ccmwaid.inf`, `project.pj`, `.sbas`, `.MySCMServerInfo`, `harvest.sig`, `.sgdrawer`, `RCS/` (holding `,v` files), `SCCS/` (holding `s.` files) | not readable here (their tools need their server and a login, are rarely installed, or would obey the working copy's own settings); the report asks for an export | |
 
 If a system is found but its tool isn't installed, or reads no history, the report says so (for example "Bazaar (but the brz command isn't installed, so no history)", or "Perforce (no history: is p4 installed and logged in?)"). Perforce is detected by asking `p4` itself, because its settings often live in the registry or environment rather than in a file.
 
@@ -460,7 +462,7 @@ A copied repository's own settings could make these tools start programs, so the
 
 **With `--offline`**, histories that come from a server aren't read: Perforce, Plastic, TFVC, and SVN, CVS or Bazaar when the history isn't on this computer (an SVN repository at a `file://` address, a local CVS root, a Bazaar branch that isn't a lightweight checkout of one elsewhere). The report lists what was left out. Git, Mercurial, Fossil and Darcs keep the whole history in the working copy, so they are read as usual.
 
-Dates: TFVC and Plastic print dates in the computer's local format, so only the year is used from them.
+Dates: TFVC prints dates in the computer's local format, so only the year is used from them; so does Plastic, from a `cm` too old to take `--dateformat`. Plastic leaves out changesets on hidden branches unless asked for them; the script doesn't ask, so a repository with hidden branches has those changesets left out.
 
 ### What each history reports
 
@@ -470,7 +472,27 @@ For Git, it also notes:
 
 - a **shallow clone** (older history is missing; run `git fetch --unshallow`);
 - commits **dated before Git existed** (7 April 2005), which must have been converted from an earlier system;
-- history **imported from other systems**, one marker per original change: Perforce changelists imported with git-p4, SVN revisions imported with git-svn, TFS changesets imported with git-tfs.
+- history **imported from other systems** (see "Projects that moved between systems" below).
+
+Every history notes changes **dated before its system existed** (SVN before October 2000, Git and Mercurial before April 2005, Plastic before 2006 and so on), which must have been converted from an earlier one, and the markers of conversion tools in its messages, one per original change:
+
+| Marker in the message | Tool | Converted from |
+|---|---|---|
+| `git-svn-id: <url>@<revision> <uuid>` | git-svn (and svn2git with `--metadata`, Atlassian's scripts) | SVN |
+| `svn path=...; revision=N` | KDE's svn2git (svn-all-fast-export) with `--add-metadata` | SVN |
+| `[git-p4: depot-paths = ...: change = N]` | git-p4 | Perforce |
+| `[p4-fusion: depot-paths = ...: change = N]` | p4-fusion | Perforce |
+| `Copied from Perforce` / ` Change: N` | Perforce Git Fusion, cloning from Perforce | Perforce |
+| `Imported from Git` ... ` sha1: <hash>` | Perforce Git Fusion, in changelists pushed from Git | Git |
+| `git-tfs-id: [...]$/path;CN` | git-tfs | TFVC |
+| `{06/03/2002 12.30 PM}` at the start | Microsoft's VSSConverter (SourceSafe to TFS) | SourceSafe |
+| `(vss N)` at the end | VSSMigrate | SourceSafe |
+| `This commit was manufactured by cvs2svn ...` | cvs2svn / cvs2git (commits they make up for branches and tags) | CVS |
+| `--HG--` | hg-git | Mercurial |
+| `--BZR--` | Breezy's Git support (round-tripping) | Bazaar |
+| `Legacy-ID: ...` | reposurgeon (`write --legacy`) | any |
+
+And what tools leave elsewhere: in Git, SubGit's `refs/svn/map`, git-tf's `TFS_C<N>` tags, p4-fusion's `refs/cl/`, `refs/notes/hg` (git-remote-hg, hg-fast-export), git-cinnabar's refs, and the `.git/svn`, `.git/git-tf`, `.git/hg2git-mapping` and `.git/cvs-revisions` files of git-svn, git-tf, hg-fast-export and git cvsimport; in Mercurial, the `convert_revision` that `hg convert` records in each changeset (an SVN revision, a Git commit, a Perforce changelist) and hg-git's `.hg/git-mapfile`; in Bazaar, revision ids that name an SVN revision (bzr-svn) or a Git commit; in Fossil, the `svn-rev-N` tags of `fossil import --svn`.
 
 When a subfolder of a Git repository is scanned, only the commits that touched that subfolder are counted (with `--full-history`, so merge commits that brought changes into it are kept).
 
@@ -516,17 +538,28 @@ SourceSafe has no server program, so a copy of the database from a backup or an 
 
 ### Projects that moved between systems
 
-**SourceSafe and Git.** When both histories are present, the script works out how they relate and gives a combined figure without counting the same work twice:
+A project that moved from one system to another (SourceSafe to SVN to Git, CVS to Mercurial, Perforce to Plastic ...), maybe more than once, often still has the older systems' histories, and the newer ones often hold them too, whole or in part. When a folder has histories in more than one system (including SourceSafe databases, and a mirror such as Plastic's GitSync), the report puts them together under "<systems> together", with each change counted once, in the newest system that has it.
 
-- **Converted**: Git's history starts within 31 days of SourceSafe's, and Git has commits on at least half of the days with SourceSafe check-ins. The history was converted into Git, so Git's numbers are the whole history and SourceSafe's are not added.
-- **One after the other**: SourceSafe's last check-in is on or before Git's first commit. The two are added together.
-- **Overlapping**: both were in use for a while. The same work may be in both, so that period is counted once, from Git: SourceSafe check-ins outside the overlap are added to all of Git's commits.
+**Finding the same change in two histories**, in this order:
 
-The summary gives the combined number of changes and date range, and says which case applied.
+1. **A conversion marker** in one names the change in the other: git-svn's revision number in an SVN history's revisions, git-p4's changelist in Perforce's, git-tfs's changeset in TFVC's, Git Fusion's commit hash in Git's, `hg convert`'s recorded revision, bzr-svn's revision id, hg-git's map.
+2. **The same message within two days** (time zones; a conversion run overnight). The message is its first line, without what conversion tools add (the marker lines above, VSSConverter's date, p4-fusion's changelist number, VSSMigrate's file version), ignoring case and spacing; empty messages and CVS's `*** empty log message ***` match nothing. Where one system only gives the year (TFVC), the same message in the same year.
+3. **The same message of at least 24 characters, found once in each history**, on any date: some conversions date every change the day they ran.
+
+**How two histories fit together**, the one that starts first being the older (on the same day, the older system; and Git as the newest, so a mirror of a Git repository is counted in Git):
+
+- **Converted**: at least half of the older history's changes are in the newer one, or (for histories with too few messages to go by, such as SourceSafe's) the newer starts within 31 days of the older and has changes on at least half of the days the older has them. The older history's changes during the newer one's are counted in the newer; those from before it starts (a partial conversion) or after it ends are added. If the newer dates the converted changes when the conversion ran (half of them more than two days off), all of the older's are taken to be in it.
+- **One after the other**: the older ends on or before the day the newer starts. Both are added (any changes found in both, once).
+- **Overlapping**: both were in use for a while, for the same work: at least a tenth of the older history's changes in that time are in the newer, or one of them has too few messages to tell. That time is counted once, from the newer.
+- **Side by side**: both were in use at the same time with messages that don't match (say, Perforce for the art and Git for the code). Both are counted in full.
+
+With three or more systems, each pair is worked out, and each older history is described with the first newer one that holds its work. A change counted in any newer history isn't counted again, so a chain such as SourceSafe, converted into SVN, converted into Git, counts each change once.
+
+The report gives each history's size and dates, a sentence on how each older one fits with a newer one, and the total ("Together, without counting it twice: N changes from ... to ..."). The summary gives the total and the chain ("SourceSafe, converted into SVN, converted into Git"). In the standard measures, a history wholly held in another isn't counted as another repository, nor are its commits; commits found in two histories are counted once; and the history to deliver is that of the systems still holding something of their own.
 
 **A Git history that starts with a bulk import.** If one of Git's root commits (dated after Git existed) adds at least 300 files, the report notes that the code was copied in from somewhere else and its earlier history isn't in Git.
 
-**Other systems side by side.** Each system found is reported with its own history: for example Git and Perforce for the same folder. Imported-history markers (git-p4, git-svn, git-tfs) and pre-2005 dates show when one history was converted from another. Contributors are counted across all histories together, each person once (section 10).
+**Repositories inside the scanned folder** with histories in more than one system are fitted together the same way, in their own section.
 
 ### Repositories inside the scanned folder, and engines outside it
 
@@ -625,6 +658,12 @@ Codebase questionnaires commonly ask for the same handful of figures, defined by
 | History | "Git, full history", "Git, but a shallow clone", another system (with the suggestion to convert it to Git or deliver a snapshot), or "flat snapshot" |
 | Changes made before 2022 | changes dated before AI coding assistants were common, out of all changes |
 
+### Code scc and jscpd don't recognise
+
+Some languages this script counts are unknown to the pinned scc, which skips their files, and to jscpd: Ren'Py (`.rpy`, `.rpym`), Verse, Ink, Twine, Naninovel, Squirrel, SkookumScript, MoonScript, BlitzMax, Monkey, AppGameKit, PL/I, RPG, VBScript, Delphi project files (`.dpr`), `.tsql`, `.tcc`, and shaders (`.shader`, `.hlsl`, `.cg`, `.cginc`, `.compute`, `.fx`, `.fxh`, `.psh`, `.usf`, `.ush`, `.gdshader`, `.gdshaderinc`, `.glslinc`). When the owner's code has some, both tools are told to read them as a known language whose comments they share, as with `--code-ext`: Ren'Py and Verse as Python, the C-like ones and shaders as C, and so on (the table is `UNRECOGNISED_CODE` in the script). Only extensions the project has are passed, so the tools' commands are otherwise the forms' own. The report says which extensions were added and gives scc's figure without them, which is what the forms' command gives. Visual Basic 6 form and control files (`.frm`, `.ctl` ...) are not added: read whole, their designer sections would count as code.
+
+The report also gives jscpd's ratio for each kind of file it read (its "formats", such as `python` or `txt`) when there is more than one, because the forms' jscpd command also reads plain-text files, and duplicated text (credits, licences, notes) can dominate the ratio.
+
 ### Running scc and jscpd
 
 The script uses pinned versions: **scc 4.1.0** (from its GitHub releases) and **jscpd 5.4.1** (from registry.npmjs.org, where it is published as a self-contained program, so Node.js isn't needed). Builds are pinned for macOS (Apple silicon and Intel), Linux (ARM64 and x64; scc also 32-bit x86; jscpd for glibc and musl) and Windows (ARM64 and x64; scc also 32-bit x86).
@@ -651,7 +690,7 @@ If a tool can't be used (there is no pinned build for this computer; it isn't in
 
 For Git, commits are counted on the main branch: the one `origin/HEAD` names, else `main`, `master`, `trunk` or `develop` (local or on `origin`), else the branch checked out. Merges, commits whose subject contains "revert", and Epic's commits in an Unreal fork are left out. For a subfolder scan, only commits touching the subfolder count.
 
-For systems that don't record merges, changes whose subject starts with "merge", "merged" or "merging", and those whose subject contains "revert", are left out. For SVN, the counted path is shown, with a note if it isn't a trunk (which could include branches). Commits from all histories that could be counted are summed, and the report says if some couldn't be.
+For systems that don't record merges, changes whose subject starts with "merge", "merged" or "merging", and those whose subject contains "revert", are left out. For SVN, the counted path is shown, with a note if it isn't a trunk (which could include branches). For Plastic SCM, the changesets on `/main`, without merges, and without those whose subject contains "revert". Commits from all histories that could be counted are summed, each counted once (see "Projects that moved between systems"), and the report says if some couldn't be.
 
 ### `--reports`
 
@@ -676,7 +715,7 @@ They are saved next to the script. If that folder can't be written to, they go i
 
 ### The text report, in order
 
-1. The script's name and version (for example `size_codebase.py 1.2.0`, with a note if `--offline` was given), the project name, then a **summary**: apparently original code (with the top three languages), visual-scripting nodes, the first history in one line (changes, people, date range, pull requests), contributors across all histories, the combined SourceSafe and Git history, and the "Check" list.
+1. The script's name and version (for example `size_codebase.py 1.2.0`, with a note if `--offline` was given), the project name, then a **summary**: apparently original code (with the top three languages), visual-scripting nodes, the first history in one line (changes, people, date range, pull requests), contributors across all histories, the history of all systems together, where there's more than one (see section 9), and the "Check" list.
 2. Project types found; Unreal versions that saved the assets; version control found; total size.
 3. **Apparently original source code** by language, with notes on tests, Epic's and other engines' notices, exact copies, files not committed to Git, and console code.
 4. Original code by folder; folders with their own licence file; text files of unknown kinds.
@@ -710,7 +749,7 @@ On Windows, `py` works in place of `python3`, and so does double-clicking the sc
 | `PATH` | A folder to scan, or a single file (such as an Access database). Several can be given; each is scanned and reported separately. With none, the script asks for folders interactively. |
 | `--third-party PATH` | Count this folder or file as someone else's code. Relative to the scanned folder, or absolute. Repeatable. Overrides every automatic rule. |
 | `--own PATH` | Count this folder or file as the owner's own code, even inside a folder that would otherwise be third-party. Repeatable. |
-| `--code-ext .EXT=NAME[:LIKE]` | Count files with this extension as code in language NAME. LIKE is a known language whose comments it shares, for scc and jscpd: `text` (default), `C`, `Ada`, `SQL`, `Lisp`, `Python` or `Pascal`. Repeatable. |
+| `--code-ext .EXT=NAME[:LIKE]` | Count files with this extension as code in language NAME. LIKE is a known language whose comments it shares, for scc and jscpd: `text` (default), `C`, `C++`, `Ada`, `SQL`, `Lisp`, `Python`, `Pascal`, `Lua` or `Visual Basic`. Repeatable. |
 | `--sql-server SERVER` | Read the code (procedures, functions, views, triggers) from this running SQL Server through `sqlcmd`. Windows sign-in, or `SQLCMDUSER`/`SQLCMDPASSWORD`. Repeatable. Can't be combined with `--offline`. |
 | `--sql-database NAME` | With `--sql-server`: read only this database instead of every user database. Repeatable; applies to every server named. |
 | `--trust-server-certificate` | With `--sql-server`: trust the server's certificate without checking it (`sqlcmd -C`), for a server you trust that has its own self-signed certificate. |
@@ -756,7 +795,9 @@ Notes on parsing: the script stops with a message, before scanning anything, at 
 
 **Database code needs the right tools.** Access VBA can only be read on Windows with Microsoft Access installed; a compiled database (`.mde`, `.accde`) has no VBA source at all. mdbtools reads queries and object counts but not VBA. SQL Server code inside `.mdf` or `.bak` files can't be read from the files; use `--sql-server` against a running server. Access macros are counted as objects, not lines. When several `--sql-server` options are given, code from every server is counted, but the Databases section shows the object counts of the last server only.
 
-**SourceSafe**: only the first five databases found are read, only the first is combined with Git, and `.ssa` archives must be restored with SourceSafe's own tools first.
+**SourceSafe**: only the first five databases found are read, and `.ssa` archives must be restored with SourceSafe's own tools first.
+
+**Histories in more than one system**: a change is found in two histories by a conversion marker or its message (section 9). A conversion that rewrote the messages and kept no marker, of a history whose messages are too few to go by, is fitted together by dates alone, which can count work done in both systems at once (side by side, for different work) only once.
 
 **Duplicate files are exact copies only.** Files that differ by a single byte are not duplicates; near-copies show up in jscpd's duplication ratio instead.
 
