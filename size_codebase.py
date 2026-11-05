@@ -68,6 +68,11 @@ attaching to a form:
 (Both hold counts only. jscpd's full report, which holds copies of the duplicated code, is never
 saved: only its totals are, as forms ask.)
 
+Test coverage is read from the reports the project's tests already wrote (lcov.info, coverage.xml,
+jacoco.xml, coverage-final.json, a Go cover profile, an OpenCover or ReportGenerator summary from
+Unity's Code Coverage package ...), wherever they are in the project, build output included. The
+tests themselves are never run. To include coverage, run them with it turned on first.
+
 Connecting to other computers. Besides downloading scc and jscpd, it asks servers only for what the
 history needs, read-only, with the access you already have (it never stops to ask for a password):
   - Git: each remote, for the pull requests it keeps (git ls-remote); GitHub, through its gh
@@ -108,7 +113,7 @@ from collections import Counter, defaultdict, namedtuple
 from datetime import datetime, timezone
 from stat import S_ISREG
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 
 # #######################################
@@ -4748,6 +4753,770 @@ class Dependencies:
 
 
 # #######################################
+# Test coverage
+# #######################################
+
+# How much of the code the project's tests run, from the coverage reports they already wrote:
+# read, never made. Making one means running the project's tests, and this script runs nothing of
+# the project's. A report is found by its name or folder, then recognised by what's in it.
+
+# ##############################
+# Where reports are
+# ##############################
+COVERAGE_WORD = re.compile(r"cov|jacoco|clover|cobertura|kover|emma|tarpaulin|resultset|last_run|nyc_output", re.I)
+# Build output the walk skips, where tests also write their reports (coverage/, htmlcov/,
+# target/site/jacoco, build/reports/jacoco ...): looked through too, but only so deep and so far.
+COVERAGE_OUTPUT_DIRS = {"coverage", "htmlcov", "build", "target", "out"}
+COVERAGE_SEARCH_DEPTH = 6
+COVERAGE_SEARCH_ENTRIES = 20_000      # files and folders looked at in each such folder, at most
+COVERAGE_MAX_READ = 256 * 1024 * 1024   # bytes: a larger JSON or text report is listed, not read
+# A report's own subfolders (its HTML pages): the report belongs to the folder above.
+COVERAGE_SUBFOLDERS = {"html", "htmlcov", "lcov-report", "html-report", "htmlreport", "coverage-html"}
+GO_PROFILE_EXTS = {".out", ".txt", ".cov", ".cover", ".coverprofile", ".profile"}
+JULIA_COVERAGE = re.compile(r"\.jl(\.\d+)?\.cov$")
+
+# ####################
+# Data that only the project's own tools can read
+# ####################
+# Raw coverage data, from which those tools make a report; with the command that makes one.
+RAW_COVERAGE = {
+    "coverage.py data (.coverage)": "coverage xml",
+    "JaCoCo data (.exec)": "gradle jacocoTestReport, or mvn jacoco:report",
+    "gcov data (.gcda)": "gcovr --xml coverage.xml",
+    "LLVM profiles (.profraw, .profdata)": "cargo llvm-cov report --lcov --output-path lcov.info, or llvm-cov export"
+                                           " -format=lcov",
+    "Go coverage data (covmeta, covcounters)": "go tool covdata textfmt -i <folder> -o coverage.out",
+    "nyc data (.nyc_output)": "npx nyc report --reporter=lcov",
+    "V8 coverage (c8, NODE_V8_COVERAGE)": "npx c8 report --reporter=lcov",
+    "Visual Studio coverage (.coverage)": "dotnet-coverage merge -f cobertura -o coverage.xml <file>",
+    "dotCover snapshots (.dcvr)": "dotCover report --reportType=XML",
+    "PHPUnit data (.cov)": "phpcov merge --clover clover.xml <folder>",
+    "Haskell HPC data (.tix)": "hpc report",
+    "Erlang/Elixir cover data (.coverdata)": "mix coveralls.json (excoveralls)",
+    "LuaCov statistics (luacov.stats.out)": "luacov",
+    "Xcode test results (.xcresult)": "xcrun xccov view --report --json <bundle>",
+    "Devel::Cover database (cover_db)": "cover -report text",
+}
+MEASURE = {"lines": "line", "statements": "statement", "branches": "branch", "functions": "function"}
+HTML_COVERAGE = "an HTML report, whose figures this script doesn't read"
+RAW_COVERAGE_EXTS = {".gcda": "gcov data (.gcda)", ".profraw": "LLVM profiles (.profraw, .profdata)",
+                     ".profdata": "LLVM profiles (.profraw, .profdata)", ".tix": "Haskell HPC data (.tix)",
+                     ".coverdata": "Erlang/Elixir cover data (.coverdata)", ".dcvr": "dotCover snapshots (.dcvr)"}
+
+# ####################
+# How a project's tests write a report
+# ####################
+# Said when no report is found, for the kinds of project found.
+COVERAGE_HINTS = [
+    ("Python", "pytest --cov --cov-report=xml (pytest-cov), or coverage run -m pytest, then coverage xml"),
+    ("JavaScript", "jest --coverage, vitest run --coverage, or the test command run through c8 or nyc"),
+    ("Unity", "Unity's Code Coverage package (com.unity.testtools.codecoverage), then the tests in the Test Runner"),
+    (".NET", "dotnet test --collect:\"XPlat Code Coverage\""),
+    ("Java (Maven)", "mvn verify, with the JaCoCo plugin's report goal"),
+    ("Java/Kotlin (Gradle)", "gradle test jacocoTestReport (the jacoco plugin), or Kover"),
+    ("Go", "go test -coverprofile=coverage.out ./..."),
+    ("Rust", "cargo llvm-cov --lcov --output-path lcov.info, or cargo tarpaulin"),
+    ("C/C++ (CMake)", "a build with --coverage, then the tests, then gcovr --xml coverage.xml"),
+]
+
+
+# ##############################
+# Reading reports
+# ##############################
+# Each reader returns {"format", "measures": {measure: [covered, total]}, "percent": {measure: %},
+# "files"}, or None if the file isn't a report of its kind. Measures: lines, statements, branches,
+# functions. Formats that list every line are counted line by line, each line once however often
+# the report repeats it (one test suite after another, say).
+
+def coverage_count(text):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return 0   # lcov's "-": never run
+
+
+def coverage_found(fmt, measures=None, files=None, percent=None):
+    measures = {k: [int(measures[k][0]), int(measures[k][1])] for k in MEASURE if (measures or {}).get(k, [0, 0])[1]}
+    percent = {k: float(p) for k, p in (percent or {}).items() if p is not None}
+    if not measures and not percent:
+        return None
+    return {"format": fmt, "measures": measures, "percent": percent, "files": files}
+
+
+def line_hits(hits):
+    """[covered, total] of {(file, line): run?}."""
+    return [sum(1 for hit in hits.values() if hit), len(hits)]
+
+
+def mark(hits, key, hit):
+    hits[key] = hits.get(key, False) or hit
+
+
+# ####################
+# LCOV
+# ####################
+# JavaScript (Istanbul, c8, Jest, Vitest), Dart and Flutter, Rust (cargo-llvm-cov, grcov), C and
+# C++ (lcov, gcovr), Elixir, Swift, Bazel ...
+
+def read_lcov(data):
+    if b"end_of_record" not in data or not re.search(rb"^SF:", data, re.M):
+        return None
+    lines, branches, summary, files = {}, {}, [0, 0], set()
+    source = None
+    for raw in data.splitlines():
+        key, _, value = raw.strip().partition(b":")
+        if key == b"SF":
+            source = value
+            files.add(source)
+        elif key == b"DA" and source is not None:
+            parts = value.split(b",")
+            if len(parts) >= 2:
+                mark(lines, (source, parts[0]), coverage_count(parts[1]) > 0)
+        elif key == b"BRDA" and source is not None:
+            parts = value.split(b",")
+            if len(parts) >= 4:
+                mark(branches, (source,) + tuple(parts[:3]), coverage_count(parts[3]) > 0)
+        elif key in (b"LH", b"LF") and value.strip().isdigit():
+            summary[key == b"LF"] += int(value)
+    measures = {"lines": line_hits(lines) if lines else summary, "branches": line_hits(branches)}
+    return coverage_found("LCOV", measures, len(files))
+
+
+# ####################
+# XML reports
+# ####################
+# Cobertura (coverage.py, Istanbul, coverlet, gcovr, tarpaulin, PHPUnit ...), JaCoCo (Java,
+# Kotlin, Android, Kover), Clover (PHPUnit, Istanbul, OpenClover), OpenCover (.NET, Unity's Code
+# Coverage package), ReportGenerator, SonarQube's generic format, scoverage (Scala), EMMA (old
+# Java, DelphiCodeCoverage), dotCover and Visual Studio's XML. Streamed: big reports aren't held
+# in memory.
+COVERAGE_XML_ROOTS = {"coverage", "report", "CoverageSession", "CoverageReport", "scoverage", "Root", "results"}
+EMMA_VALUE = re.compile(r"\((\d+(?:\.\d+)?)/(\d+(?:\.\d+)?)\)")
+
+
+def read_coverage_xml(path):
+    import xml.etree.ElementTree as ET
+    depth, fmt, root = 0, None, {}
+    totals = defaultdict(lambda: [0, 0])   # measure -> [covered, total], as the report adds them up
+    lines, files, source, package, listed_files = {}, set(), None, None, None
+    try:
+        for event, elem in ET.iterparse(path, events=("start", "end")):
+            tag = elem.tag.rsplit("}", 1)[-1]
+            if event == "end":
+                depth -= 1
+                if fmt == "ReportGenerator" and depth == 2 and elem.text and elem.text.strip().isdigit():
+                    root.setdefault("summary", {})[tag.lower()] = int(elem.text.strip())
+                elem.clear()   # done with it: free its memory
+                continue
+            depth += 1
+            a = elem.attrib
+
+            # ####################
+            # Which format, from the top element and its first child
+            # ####################
+            if depth == 1:
+                if tag not in COVERAGE_XML_ROOTS:
+                    return None
+                root = dict(a)
+                fmt = {"CoverageSession": "OpenCover", "CoverageReport": "ReportGenerator", "scoverage": "scoverage",
+                       "Root": "dotCover" if "TotalStatements" in a else None}.get(tag)
+                if tag == "coverage" and ("line-rate" in a or "lines-valid" in a):
+                    fmt = "Cobertura"
+                root["tag"] = tag
+                continue
+            if fmt is None and depth == 2:
+                fmt = {("coverage", "project"): "Clover", ("coverage", "file"): "SonarQube generic",
+                       ("report", "stats"): "EMMA", ("report", "data"): "EMMA", ("report", "sessioninfo"): "JaCoCo",
+                       ("report", "package"): "JaCoCo", ("report", "group"): "JaCoCo", ("report", "counter"): "JaCoCo",
+                       ("results", "modules"): "Visual Studio"}.get((root["tag"], tag))
+                if fmt is None:
+                    return None
+
+            # ####################
+            # Its figures
+            # ####################
+            if fmt == "Cobertura":
+                if tag == "class":
+                    source = a.get("filename")
+                    files.add(source)
+                elif tag == "line" and "number" in a:
+                    mark(lines, (source, a["number"]), coverage_count(a.get("hits")) > 0)
+            elif fmt == "SonarQube generic":
+                if tag == "file":
+                    source = a.get("path")
+                    files.add(source)
+                elif tag == "lineToCover":
+                    mark(lines, (source, a.get("lineNumber")), a.get("covered") == "true")
+                    totals["branches"][0] += int(a.get("coveredBranches") or 0)
+                    totals["branches"][1] += int(a.get("branchesToCover") or 0)
+            elif fmt == "JaCoCo":
+                if tag == "counter" and depth == 2:   # the report's own totals
+                    measure = {"LINE": "lines", "BRANCH": "branches", "METHOD": "functions"}.get(a.get("type"))
+                    if measure:
+                        totals[measure] = [int(a.get("covered", 0)), int(a.get("covered", 0)) + int(a.get("missed", 0))]
+                elif tag == "package":
+                    package = a.get("name")
+                elif tag == "sourcefile":
+                    files.add((package, a.get("name")))
+            elif fmt == "Clover":
+                if tag == "metrics" and depth == 3:   # the project's totals
+                    for measure, count in (("statements", "statements"), ("branches", "conditionals"),
+                                           ("functions", "methods")):
+                        totals[measure] = [int(a.get("covered" + count, 0)), int(a.get(count, 0))]
+                    listed_files = int(a["files"]) if a.get("files", "").isdigit() else None
+            elif fmt == "OpenCover":
+                if tag == "Summary" and depth == 2:
+                    totals["statements"] = [int(a.get("visitedSequencePoints", 0)), int(a.get("numSequencePoints", 0))]
+                    totals["branches"] = [int(a.get("visitedBranchPoints", 0)), int(a.get("numBranchPoints", 0))]
+                    totals["functions"] = [int(a.get("visitedMethods", 0)), int(a.get("numMethods", 0))]
+                elif tag == "File" and "fullPath" in a:
+                    files.add(a["fullPath"])
+            elif fmt == "EMMA":
+                if tag == "coverage" and depth == 4:   # report > data > all > coverage: the totals
+                    m = EMMA_VALUE.search(a.get("value", ""))
+                    measure = {"line": "lines", "block": "statements", "method": "functions"}.get(
+                        a.get("type", "").split(",")[0])
+                    if m and measure:
+                        totals[measure] = [round(float(m.group(1))), round(float(m.group(2)))]
+                elif tag == "package":
+                    package = a.get("name")
+                elif tag == "srcfile":
+                    files.add((package, a.get("name")))
+            elif fmt == "Visual Studio":
+                if tag == "module":
+                    covered = int(a.get("lines_covered", 0)) + int(a.get("lines_partially_covered", 0))
+                    totals["lines"][0] += covered
+                    totals["lines"][1] += covered + int(a.get("lines_not_covered", 0))
+                elif tag == "source_file":
+                    files.add(a.get("path"))
+    except ET.ParseError:
+        if fmt is None:
+            return None
+        return {"format": fmt + " XML", "unread": "malformed XML"}
+
+    # ####################
+    # The totals of formats that give them at the top
+    # ####################
+    if fmt == "Cobertura":
+        valid = int(root.get("lines-valid") or 0)
+        if valid:   # what the tool itself counted
+            totals["lines"] = [int(root.get("lines-covered") or 0), valid]
+        elif lines:
+            totals["lines"] = line_hits(lines)
+        totals["branches"] = [int(root.get("branches-covered") or 0), int(root.get("branches-valid") or 0)]
+        percent = {} if totals["lines"][1] else {"lines": 100 * coverage_count(root.get("line-rate"))}
+        return coverage_found("Cobertura XML", totals, len(files) or None, percent)
+    if fmt == "SonarQube generic":
+        totals["lines"] = line_hits(lines)
+    elif fmt == "scoverage":
+        totals["statements"] = [int(root.get("statements-invoked") or 0), int(root.get("statement-count") or 0)]
+    elif fmt == "dotCover":
+        totals["statements"] = [int(root.get("CoveredStatements") or 0), int(root.get("TotalStatements") or 0)]
+    elif fmt == "ReportGenerator":
+        s = root.get("summary", {})
+        for measure, covered, total in (("lines", "coveredlines", "coverablelines"),
+                                        ("branches", "coveredbranches", "totalbranches"),
+                                        ("functions", "coveredmethods", "totalmethods")):
+            totals[measure] = [s.get(covered, 0), s.get(total, 0)]
+        return coverage_found("ReportGenerator summary", totals, s.get("files"))
+    return coverage_found(fmt + " XML", totals, listed_files or len(files) or None)
+
+
+# ####################
+# JSON reports
+# ####################
+# coverage.py, Istanbul (coverage-final.json, coverage-summary.json), llvm-cov and cargo-llvm-cov,
+# tarpaulin, gcovr, kcov, Xcode's xccov, ReportGenerator, Coveralls (excoveralls and others),
+# SimpleCov (Ruby) and coverlet's own format.
+
+def read_coverage_json(data):
+    if re.match(rb'\s*\{\s*"result"\s*:\s*\[\s*\{\s*"scriptId"', data[:200]):
+        return {"raw": "V8 coverage (c8, NODE_V8_COVERAGE)"}
+    try:
+        doc = json.loads(data)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(doc, dict) or not doc:
+        return None
+    get = doc.get
+    first = next(iter(doc.values()))
+
+    # ####################
+    # Formats that give their totals
+    # ####################
+    totals = get("totals")
+    if isinstance(get("meta"), dict) and isinstance(totals, dict) and "num_statements" in totals:
+        return coverage_found("coverage.py JSON", {
+            "lines": [totals.get("covered_lines", 0), totals["num_statements"]],
+            "branches": [totals.get("covered_branches", 0), totals.get("num_branches", 0)]}, len(get("files") or ()))
+    total = get("total")
+    if isinstance(total, dict) and isinstance(total.get("lines"), dict) and "total" in total["lines"]:
+        return coverage_found("Istanbul summary JSON", {
+            measure: [total[key].get("covered", 0), total[key].get("total", 0)]
+            for measure, key in (("lines", "lines"), ("statements", "statements"), ("branches", "branches"),
+                                 ("functions", "functions")) if isinstance(total.get(key), dict)}, len(doc) - 1)
+    if get("type") == "llvm.coverage.json.export" and isinstance(get("data"), list):
+        found = defaultdict(lambda: [0, 0])
+        files = 0
+        for export in get("data"):
+            files += len(export.get("files") or ())
+            for measure, key in (("lines", "lines"), ("branches", "branches"), ("functions", "functions")):
+                t = (export.get("totals") or {}).get(key) or {}
+                found[measure][0] += t.get("covered", 0)
+                found[measure][1] += t.get("count", 0)
+        return coverage_found("llvm-cov JSON", found, files)
+    if "line_total" in doc and "line_covered" in doc:
+        return coverage_found("gcovr summary JSON", {
+            "lines": [get("line_covered"), get("line_total")], "branches": [get("branch_covered", 0), get("branch_total", 0)],
+            "functions": [get("function_covered", 0), get("function_total", 0)]}, len(get("files") or ()))
+    if "covered_lines" in doc and "total_lines" in doc:
+        return coverage_found("kcov JSON", {"lines": [int(get("covered_lines")), int(get("total_lines"))]},
+                              len(get("files") or ()))
+    if "coveredLines" in doc and "executableLines" in doc:
+        return coverage_found("xccov JSON", {"lines": [get("coveredLines"), get("executableLines")]},
+                              sum(len(t.get("files") or ()) for t in get("targets") or ()) or None)
+    summary = get("summary")
+    if isinstance(summary, dict) and "coverablelines" in summary:
+        return coverage_found("ReportGenerator summary JSON", {
+            "lines": [summary.get("coveredlines", 0), summary["coverablelines"]],
+            "branches": [summary.get("coveredbranches") or 0, summary.get("totalbranches") or 0],
+            "functions": [summary.get("coveredmethods") or 0, summary.get("totalmethods") or 0]})
+    if isinstance(get("files"), list) and get("files") and isinstance(get("files")[0], dict) \
+            and "coverable" in get("files")[0]:
+        return coverage_found("tarpaulin JSON", {"lines": [sum(f.get("covered", 0) for f in get("files")),
+                                                           sum(f.get("coverable", 0) for f in get("files"))]},
+                              len(get("files")))
+    result = get("result")
+    if isinstance(result, dict) and ("line" in result or "covered_percent" in result):   # SimpleCov's .last_run.json
+        return coverage_found("SimpleCov summary", percent={"lines": result.get("line", result.get("covered_percent")),
+                                                            "branches": result.get("branch")})
+
+    # ####################
+    # Formats counted line by line
+    # ####################
+    lines, branches, statements, functions = {}, [0, 0], [0, 0], [0, 0]
+    if "gcovr/format_version" in doc:
+        for f in get("files") or ():
+            for line in f.get("lines") or ():
+                if not line.get("gcovr/noncode"):
+                    mark(lines, (f.get("file"), line.get("line_number")), (line.get("count") or 0) > 0)
+        return coverage_found("gcovr JSON", {"lines": line_hits(lines)}, len(get("files") or ()))
+    if isinstance(get("source_files"), list):   # Coveralls
+        for f in get("source_files"):
+            for i, count in enumerate(f.get("coverage") or ()):
+                if isinstance(count, int):
+                    mark(lines, (f.get("name"), i), count > 0)
+        return coverage_found("Coveralls JSON", {"lines": line_hits(lines)}, len({f.get("name") for f in get("source_files")}))
+    if isinstance(first, dict) and "statementMap" in first:   # Istanbul's coverage-final.json
+        for path, f in doc.items():
+            counts = f.get("s") or {}
+            for key, where in (f.get("statementMap") or {}).items():
+                mark(lines, (path, where.get("start", {}).get("line")), (counts.get(key) or 0) > 0)
+            statements[0] += sum(1 for n in counts.values() if n)
+            statements[1] += len(counts)
+            functions[0] += sum(1 for n in (f.get("f") or {}).values() if n)
+            functions[1] += len(f.get("f") or {})
+            for taken in (f.get("b") or {}).values():
+                branches[0] += sum(1 for n in taken if n)
+                branches[1] += len(taken)
+        return coverage_found("Istanbul JSON", {"lines": line_hits(lines), "statements": statements,
+                                                "branches": branches, "functions": functions}, len(doc))
+    if isinstance(first, dict) and isinstance(first.get("coverage"), dict) and "timestamp" in first:   # SimpleCov
+        for suite in doc.values():
+            for path, counts in (suite.get("coverage") or {}).items():
+                for i, count in enumerate((counts.get("lines") if isinstance(counts, dict) else counts) or ()):
+                    if isinstance(count, int):
+                        mark(lines, (path, i), count > 0)
+        return coverage_found("SimpleCov results", {"lines": line_hits(lines)}, len({p for p, _ in lines}))
+    if all(k.lower().endswith((".dll", ".exe")) for k in doc) and isinstance(first, dict):   # coverlet
+        for sources in doc.values():
+            for path, classes in sources.items():
+                for methods in classes.values():
+                    for method in methods.values():
+                        for line, hits in (method.get("Lines") or {}).items():
+                            mark(lines, (path, line), hits > 0)
+                        for branch in method.get("Branches") or ():
+                            branches[0] += branch.get("Hits", 0) > 0
+                            branches[1] += 1
+        return coverage_found("coverlet JSON", {"lines": line_hits(lines), "branches": branches},
+                              len({p for p, _ in lines}))
+    return None
+
+
+# ####################
+# Text reports
+# ####################
+GO_BLOCK = re.compile(rb"^(.+):(\d+\.\d+,\d+\.\d+) (\d+) (\d+)\s*$")
+LUACOV_TOTAL = re.compile(rb"^Total\s+(\d+)\s+(\d+)\s+[\d.]+%\s*$", re.M)
+JULIA_LINE = re.compile(rb"^\s*(-|\d+) ")
+
+
+def read_go_profile(data):
+    """go test -coverprofile: one line per block of statements, with how often it ran."""
+    rows = data.splitlines()
+    if not rows or not re.match(rb"mode: (set|count|atomic)\s*$", rows[0]):
+        return None
+    blocks = {}
+    for row in rows[1:]:
+        m = GO_BLOCK.match(row)
+        if m:
+            key = (m.group(1), m.group(2))
+            ran = int(m.group(4)) > 0 or blocks.get(key, (0, False))[1]
+            blocks[key] = (int(m.group(3)), ran)
+    statements = [sum(n for n, ran in blocks.values() if ran), sum(n for n, _ in blocks.values())]
+    return coverage_found("Go cover profile", {"statements": statements}, len({f for f, _ in blocks}))
+
+
+def read_luacov_report(data):
+    totals = LUACOV_TOTAL.findall(data)
+    if not totals:
+        return None
+    hits, missed = (int(n) for n in totals[-1])
+    return coverage_found("LuaCov report", {"lines": [hits, hits + missed]})
+
+
+def read_jacoco_csv(data):
+    import csv
+    import io
+    rows = csv.DictReader(io.StringIO(data.decode("utf-8", "replace")))
+    if not rows.fieldnames or "LINE_COVERED" not in rows.fieldnames:
+        return None
+    found = defaultdict(lambda: [0, 0])
+    for row in rows:
+        for measure, key in (("lines", "LINE"), ("branches", "BRANCH"), ("functions", "METHOD")):
+            covered = int(row.get(key + "_COVERED") or 0)
+            found[measure][0] += covered
+            found[measure][1] += covered + int(row.get(key + "_MISSED") or 0)
+    return coverage_found("JaCoCo CSV", found)
+
+
+def gcov_lines(data):
+    """{(source, line): run?} from gcov's annotated copy of a source file, or None."""
+    if not re.match(rb"\s*-:\s*0:Source:", data):
+        return None
+    lines, source = {}, None
+    for row in data.splitlines():
+        parts = row.split(b":", 2)
+        if len(parts) < 3:
+            continue
+        count, number = parts[0].strip(), parts[1].strip()
+        if number == b"0":
+            if parts[2].startswith(b"Source:"):
+                source = parts[2][7:].strip()
+        elif count != b"-" and number.isdigit():
+            mark(lines, (source, number), count.rstrip(b"*") not in (b"#####", b"=====", b"0"))
+    return lines
+
+
+def julia_lines(data, source):
+    """{(source, line): run?} from a Julia .cov file (each source line, after how often it ran)."""
+    lines = {}
+    for i, row in enumerate(data.splitlines()):
+        m = JULIA_LINE.match(row)
+        if m is None:
+            return None
+        if m.group(1) != b"-":
+            mark(lines, (source, i), int(m.group(1)) > 0)
+    return lines
+
+
+# ####################
+# HTML reports
+# ####################
+# Read only when they're the only copy: coverage.py's and Istanbul's front pages.
+ISTANBUL_FIGURE = r"<span class=.quiet.>\s*{}\s*</span>\s*<span class=.fraction.>\s*(\d+)\s*/\s*(\d+)"
+
+
+def read_coverage_html(data):
+    if b"coverage.py" in data:
+        row = re.search(rb'<tr class="total">(.*?)</tr>', data, re.S)
+        numbers = [int(n) for n in re.findall(rb"<td[^>]*>\s*(\d+)\s*</td>", row.group(1))] if row else []
+        if len(numbers) >= 2:   # statements, missing
+            return coverage_found("coverage.py HTML", {"lines": [numbers[0] - numbers[1], numbers[0]]})
+    if b"istanbul" in data.lower():
+        found = {}
+        for measure, label in (("lines", "Lines"), ("statements", "Statements"), ("branches", "Branches"),
+                               ("functions", "Functions")):
+            m = re.search(ISTANBUL_FIGURE.format(label).encode(), data)
+            if m:
+                found[measure] = [int(m.group(1)), int(m.group(2))]
+        if found:
+            return coverage_found("Istanbul HTML", found)
+    return None
+
+
+# ##############################
+# Collecting and reporting
+# ##############################
+
+def coverage_folder(rel):
+    """A folder relative to the scanned one, with "/", and "" for the scanned folder itself."""
+    rel = os.path.normpath(rel).replace(os.sep, "/")
+    return "" if rel == "." else rel
+
+
+def coverage_home(folder):
+    """The folder a report belongs to: above its own subfolders (coverage/lcov-report -> coverage)."""
+    parts = folder.split("/") if folder else []
+    while parts and parts[-1].lower() in COVERAGE_SUBFOLDERS:
+        parts.pop()
+    return "/".join(parts)
+
+
+def folder_within(folder, other):
+    return not other or folder == other or folder.startswith(other + "/")
+
+
+def coverage_beside(folder, home):
+    """Whether raw data in folder is beside a report in home, and so what the report was made from:
+    both in the same top-level folder (app/build/jacoco and app/build/reports/jacoco; build/CMakeFiles/...
+    and build), or both at the top or just below it (.coverage and coverage.xml or htmlcov;
+    .nyc_output and coverage)."""
+    folder = coverage_home(folder)
+    top = lambda f: f.split("/")[0]
+    shallow = lambda f: "/" not in f
+    return bool(folder and home and top(folder) == top(home)) or (shallow(folder) and shallow(home))
+
+
+class CoverageReports:
+    """Collects, while the folder is walked, the coverage reports the project's tests wrote, and
+    raw coverage data that only the project's own tools can read."""
+
+    def __init__(self):
+        self.reports = []                  # {"folder", "format", "date", "measures", "percent", "files"}
+        self.unread = {}                   # (folder, kind) -> {"files", "date", "how"}
+        self.by_line = {}                  # format -> [{(source, line): run?}, {folders}, latest date]
+        self.html_folders = []             # folders with an HTML report: the pages below them are its own
+
+    # ####################
+    # During the walk
+    # ####################
+
+    def saw_folder(self, name, rel):
+        n = name.lower()
+        if n.endswith(".xcresult") or n == "cover_db":
+            kind = "Xcode test results (.xcresult)" if n.endswith(".xcresult") else "Devel::Cover database (cover_db)"
+            self.found_unread(coverage_folder(rel), kind, None)
+
+    def search(self, folder, rel):
+        """A folder the walk skips as build output, where reports are often written."""
+        seen, top = 0, folder.rstrip(os.sep).count(os.sep)
+        for dirpath, dirnames, filenames in os.walk(folder):
+            here = os.path.join(rel, os.path.relpath(dirpath, folder))
+            deep = dirpath.count(os.sep) - top >= COVERAGE_SEARCH_DEPTH
+            dirnames[:] = [] if deep else [d for d in dirnames if d.lower() not in ALWAYS_SKIP
+                                           and not is_link(os.path.join(dirpath, d))]
+            for d in dirnames:
+                self.saw_folder(d, here)
+            for name in filenames:
+                path = os.path.join(dirpath, name)
+                try:
+                    st = os.lstat(path)
+                except OSError:
+                    continue
+                if S_ISREG(st.st_mode):
+                    self.saw_file(path, name, here, st)
+            seen += len(dirnames) + len(filenames)
+            if seen > COVERAGE_SEARCH_ENTRIES:
+                break
+
+    def saw_file(self, path, name, rel, st):
+        """Any file of the studio's own (rel: its folder): a report, or raw coverage data, or neither."""
+        n = name.lower()
+        ext = os.path.splitext(n)[1]
+        kind = RAW_COVERAGE_EXTS.get(ext)
+        if kind is None and n.startswith(("covmeta.", "covcounters.")):
+            kind = "Go coverage data (covmeta, covcounters)"
+        elif kind is None and n == "luacov.stats.out":
+            kind = "LuaCov statistics (luacov.stats.out)"
+        elif kind is None and ext == ".coverage" and n != ".coverage":
+            kind = "Visual Studio coverage (.coverage)"
+        if kind:
+            self.found_unread(coverage_folder(rel), kind, st.st_mtime)
+            return
+        lcov = ext in (".lcov", ".info", ".dat") and ("lcov" in n or n in ("coverage.info", "coverage.dat")
+                                                      or n.endswith("_coverage_report.dat"))
+        if not (n == ".coverage" or n.startswith(".coverage.") or ext in (".exec", ".gcov") or lcov
+                or n == "luacov.report.out" or JULIA_COVERAGE.search(n)
+                or (ext in GO_PROFILE_EXTS and (COVERAGE_WORD.search(n) or n in ("c.out", "profile.out")))
+                or (ext in (".xml", ".coveragexml", ".json", ".csv", ".html", ".htm")
+                    and (COVERAGE_WORD.search(n) or COVERAGE_WORD.search(rel)))):
+            return
+        folder = coverage_folder(rel)
+        try:
+            self.read(path, n, ext, folder, st, lcov)
+        except Exception:   # a report this script misreads: listed, not counted
+            self.found_unread(folder, "a coverage report it couldn't read", st.st_mtime)
+
+    def read(self, path, n, ext, folder, st, lcov):
+        if ext in (".xml", ".coveragexml"):
+            found = read_coverage_xml(path)
+        else:
+            if ".nyc_output" in folder.split("/"):
+                if ext == ".json":
+                    self.found_unread(folder, "nyc data (.nyc_output)", st.st_mtime)
+                return
+            if ext in (".html", ".htm") and (any(folder_within(folder, f) for f in self.html_folders)
+                                             or not (n.startswith("index.") or COVERAGE_WORD.search(n))):
+                return   # one of an HTML report's own pages
+            sniff = n == ".coverage" or n.startswith(".coverage.") or ext == ".exec"   # only the start is needed
+            if st.st_size > COVERAGE_MAX_READ and not sniff:
+                if COVERAGE_WORD.search(n):
+                    self.found_unread(folder, "a coverage report too large to read", st.st_mtime)
+                return
+            with open(path, "rb") as f:
+                data = f.read(4096) if sniff else f.read()
+            found = None
+            if n == ".coverage" or n.startswith(".coverage."):
+                if data.startswith((b"SQLite format 3", b"!coverage.py")):
+                    found = {"raw": "coverage.py data (.coverage)"}
+            elif ext == ".exec":
+                if data.startswith(b"\x01\xc0\xc0"):
+                    found = {"raw": "JaCoCo data (.exec)"}
+            elif ext == ".json":
+                found = read_coverage_json(data)
+            elif ext == ".csv":
+                found = read_jacoco_csv(data) if "jacoco" in n else None
+            elif ext in (".html", ".htm"):
+                if b"coverage" in data.lower():
+                    self.html_folders.append(folder)
+                    found = read_coverage_html(data) or {"raw": HTML_COVERAGE}
+            elif ext == ".gcov" or JULIA_COVERAGE.search(n):
+                lines = gcov_lines(data) if ext == ".gcov" else julia_lines(data, (folder, JULIA_COVERAGE.sub(".jl", n)))
+                if lines is not None:
+                    fmt = "gcov files" if ext == ".gcov" else "Julia .cov files"
+                    hits, folders, latest = self.by_line.setdefault(fmt, [{}, set(), 0])
+                    for key, hit in lines.items():
+                        mark(hits, key, hit)
+                    folders.add(folder)
+                    self.by_line[fmt][2] = max(latest, st.st_mtime)
+                return
+            elif data.startswith(b"<?php") and b"CodeCoverage" in data[:4096]:
+                found = {"raw": "PHPUnit data (.cov)"}
+            elif n == "luacov.report.out":
+                found = read_luacov_report(data)
+            elif lcov:
+                found = read_lcov(data)
+            else:
+                found = read_go_profile(data)
+        if found is None:
+            return
+        if "raw" in found:
+            self.found_unread(folder, found["raw"], st.st_mtime)
+        elif "unread" in found:
+            self.found_unread(folder, f"a {found['format']} report it couldn't read ({found['unread']})", st.st_mtime)
+        else:
+            self.reports.append(dict(found, folder=folder, date=st.st_mtime))
+
+    def found_unread(self, folder, kind, mtime):
+        got = self.unread.setdefault((folder, kind), {"files": 0, "date": None, "how": RAW_COVERAGE.get(kind)})
+        got["files"] += 1
+        if mtime is not None:
+            got["date"] = max(got["date"] or 0, mtime)
+
+    # ####################
+    # The report
+    # ####################
+
+    def readable(self):
+        """The reports, one per folder: where a test run wrote the same figures in several formats
+        (lcov.info, coverage-final.json and clover.xml, say), the one that counts lines, and the most."""
+        reports = list(self.reports)
+        for fmt, (hits, folders, latest) in self.by_line.items():
+            shared = []   # the folder they're all in
+            for parts in zip(*(f.split("/") if f else [] for f in folders)):
+                if len(set(parts)) > 1:
+                    break
+                shared.append(parts[0])
+            folder = "/".join(shared)
+            reports.append({"format": fmt, "measures": {"lines": line_hits(hits)}, "percent": {},
+                            "files": len({source for source, _ in hits}), "folder": folder, "date": latest})
+        best = {}
+        for r in reports:
+            r["home"] = coverage_home(r["folder"])
+            # Lines first, then the most measures, then a machine-readable format, then by name.
+            r["rank"] = ("lines" not in r["measures"], -len(r["measures"]), "HTML" in r["format"], r["format"])
+            best.setdefault(r["home"], []).append(r)
+        chosen = []
+        for home, group in best.items():
+            top = min(r["rank"] for r in group)
+            # The best format in each folder; reports in the same format there are separate runs.
+            fmt = next(r["format"] for r in group if r["rank"] == top)
+            chosen += [r for r in group if r["format"] == fmt]
+        return sorted(chosen, key=lambda r: -max([t for _, t in r["measures"].values()] or [0]))
+
+    def report(self, kinds):
+        """(report lines, the summary's line, facts)."""
+        reports = self.readable()
+        homes = [r["home"] for r in reports]
+        # Raw data beside a report (coverage.py's .coverage beside its coverage.xml, say) is what
+        # the report was made from.
+        unread = sorted(((folder, kind, got) for (folder, kind), got in self.unread.items()
+                         if not any(coverage_beside(folder, h) for h in homes)), key=lambda row: (row[0], row[1]))
+        day = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%d") if t else None
+        where = lambda folder: folder or "(top level)"
+        where_in = lambda folder: f"in {folder}" if folder else "at the top level"
+
+        def figures(r):
+            main = next((m for m in ("lines", "statements") if m in r["measures"]), None)
+            parts = []
+            for measure in ([main] if main else []) + [m for m in ("branches", "functions") if m in r["measures"]]:
+                covered, total = r["measures"][measure]
+                parts.append(f"{100 * covered / total:.1f}% of {total:,} {measure if total != 1 else MEASURE[measure]}")
+            if not parts:
+                parts = [f"{p:.1f}% of {m}" for m, p in r["percent"].items()]
+            return ", ".join(parts)
+
+        # ####################
+        # Report lines
+        # ####################
+        out = [""]
+        if reports:
+            out += ["Test coverage, from the reports the project's tests already wrote (read, not measured: each",
+                    "shows the code as it was when its tests last ran, as its own tool counted it):"]
+            for r in reports[:10]:
+                detail = ", ".join([r["format"]] + ([plural(r["files"], "file")] if r["files"] else [])
+                                   + [day(r["date"])])
+                out.append(f"  {where(r['folder']):<32} {figures(r)}  ({detail})")
+            if len(reports) > 10:
+                out.append(f"  ... and {len(reports) - 10} more")
+        else:
+            out.append("Test coverage: no coverage reports found in the folder.")
+        if unread:
+            out.append(("  " if reports else "") + "Coverage data that only the project's own tools can read (a report"
+                       " made from it would be counted):")
+            for folder, kind, got in unread[:10]:
+                when = f", {day(got['date'])}" if got["date"] else ""
+                how = f": {got['how']}" if got["how"] else ""
+                out.append(f"    {where(folder)}: {kind} ({plural(got['files'], 'file')}{when}){how}")
+            if len(unread) > 10:
+                out.append(f"    ... and {len(unread) - 10} more")
+        hints = [(kind, how) for kind, how in COVERAGE_HINTS if kind in kinds]
+        if not reports:
+            out += ["To include it, run the tests with coverage turned on first, so their report is in the folder, then",
+                    "run this again (this script itself runs nothing of the project's)." + (" For example:" if hints else "")]
+            out += [f"  {kind}: {how}" for kind, how in hints]
+
+        # ####################
+        # The summary's line, and facts
+        # ####################
+        if reports:
+            r = reports[0]
+            summary = (f"  Test coverage: {figures(r).split(', ')[0]} ({r['format']} {where_in(r['folder'])},"
+                       f" {day(r['date'])})" + (f"; {plural(len(reports) - 1, 'more report')} below"
+                                                if len(reports) > 1 else ""))
+        else:
+            summary = "  Test coverage: " + ("no readable report (coverage data found: see below)" if unread
+                                             else "no reports found")
+        facts = {"reports": [{"folder": r["folder"], "format": r["format"], "date": day(r["date"]),
+                              "files": r["files"], **{m: {"covered": c, "total": t} for m, (c, t) in r["measures"].items()},
+                              **({"percent": r["percent"]} if r["percent"] else {})} for r in reports],
+                 "unread": [{"folder": folder, "kind": kind, "files": got["files"], "date": day(got["date"]),
+                             "how_to_make_a_report": got["how"]} for folder, kind, got in unread]}
+        return out, summary, facts
+
+
+# #######################################
 # More about the copy
 # #######################################
 
@@ -5544,6 +6313,7 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     nested_repos = []       # (rel, path) of repositories inside the scanned folder
     deps = Dependencies(root)
     dbcode = DatabaseCode()
+    test_coverage = CoverageReports()
     source_lines = Counter()   # own lines read from source files, by language (the rest came from databases)
     unrecognised = set()       # extensions of the studio's own code that scc and jscpd must be told about
     c_family = Counter()       # own C/C++ lines, as forms name them: "C", "C header", "C++"
@@ -5696,9 +6466,15 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
             listed = here_own and dl not in (".git", ".svn", ".hg", ".bzr")
             if listed:   # until it's found to be the studio's own, below
                 not_own_folders.append(d if rel == "." else f"{rel_slash}/{d}")
+            if here_own:
+                test_coverage.saw_folder(d, rel)
             if dl in skip or dl.endswith(".egg-info") or os.path.isfile(os.path.join(full, "pyvenv.cfg")):
+                if here_own and dl in COVERAGE_OUTPUT_DIRS and not is_link(full):
+                    test_coverage.search(full, os.path.join(rel, d))   # build output, but tests write reports there
                 continue
             if dl.startswith("cmake-build-") or os.path.isfile(os.path.join(full, "CMakeCache.txt")):
+                if here_own and not is_link(full):
+                    test_coverage.search(full, os.path.join(rel, d))
                 continue   # a CMake build folder
             if dl == "packages" and any(f.lower().endswith(".nupkg") for sub in list_files(full)[:5]
                                         for f in list_files(os.path.join(full, sub))):
@@ -5769,6 +6545,7 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                         deps.saw_build_file(path, name)
                     if MANIFEST_FILE.match(name) or (name.lower() == "manifest.json" and in_unity_packages):
                         deps.saw_manifest(path, name)
+                    test_coverage.saw_file(path, name, rel, st)
                 if ext in BINARY_LIBRARY_EXTS:
                     binaries["own" if category in ("own", "test") else "third-party"] += 1
                 if ext in DATA_FILE_EXTS and st.st_size >= DATA_FILE_MIN and name.lower() != "thumbs.db" \
@@ -6393,6 +7170,16 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                 "      folder too (the one that contains Engine/)."]
 
     # ####################
+    # Test coverage
+    # ####################
+    coverage_summary = coverage_facts = None
+    try:
+        section, coverage_summary, coverage_facts = test_coverage.report(kinds_found)
+        out += section
+    except Exception as e:   # a report section shouldn't cost the whole report
+        problems.append(f"reporting the test coverage: {describe(e, root)}")
+
+    # ####################
     # Standard measures
     # ####################
     standard_facts = None
@@ -6482,6 +7269,8 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     if combined:
         n, first, last, how = combined
         summary.append(f"  History, all systems together: {n:,} changes, {first} to {last} ({how})")
+    if coverage_summary:
+        summary.append(coverage_summary)
     if alerts:
         summary.append("  Check: " + "; ".join(alerts))
     out[2:2] = summary + [""]
@@ -6512,6 +7301,7 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
             "copyright_years": [min(copyright_years), max(copyright_years)] if copyright_years else None,
             "licence": licence, "public_repositories": public, "submodules": submodule_list,
             "alerts": alerts, "problems": problems, "standard_measures": standard_facts,
+            "test_coverage": coverage_facts,
             "unknown_text_files": {ext: {"files": n, "bytes": size} for ext, n, size in unknown},
             "code_extensions_named": {ext: name for ext, (name, _) in EXTRA_CODE.items()},
             "databases": {"access": [{"format": f, "compiled": c, **{k: v for k, v in g.items() if k not in ("queries", "vba")},

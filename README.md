@@ -23,7 +23,8 @@ It only reads files and uploads nothing. The report holds counts and the names o
 languages and libraries: no source code and no author names. Please read it before you send it.
 Point it at the real project, not a build or a ZIP download (a ZIP has no history), and if your
 history is in Perforce, Plastic or SVN, run it inside your workspace while logged in so it can read
-it.
+it. If your tests measure code coverage, run them with coverage turned on first: the script reads
+the report they leave (it never runs your tests itself).
 
 For everything it handles and where it can go wrong, see [HOW_IT_WORKS.md](HOW_IT_WORKS.md). For
 every connection it makes, every program it runs and how to verify your copy, see
