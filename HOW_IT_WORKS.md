@@ -48,6 +48,7 @@ Microsoft Access is only ever given a temporary *copy* of a database, and only o
 
 - **A folder.** The usual case. Everything under it is scanned.
 - **Several folders.** Each is scanned and reported separately, with the same options.
+- **Folders or files of old history**, with `--history`, besides the project: see [section 9](#old-history-kept-elsewhere---history).
 - **A single file.** Typically an Access database, which holds a whole program in one file. Only that file is examined (its folder supplies the version-control context). scc and jscpd are not run on a single file.
 - **Nothing.** Started without arguments (for example by double-clicking it on Windows), it asks for a folder: drag it into the window or paste the path, press Enter, and repeat for more folders. An empty line ends it. Options can't be given in this mode.
 
@@ -538,32 +539,51 @@ SourceSafe has no server program, so a copy of the database from a backup or an 
 
 ### Projects that moved between systems
 
-A project that moved from one system to another (SourceSafe to SVN to Git, CVS to Mercurial, Perforce to Plastic ...), maybe more than once, often still has the older systems' histories, and the newer ones often hold them too, whole or in part. When a folder has histories in more than one system (including SourceSafe databases, and a mirror such as Plastic's GitSync), the report puts them together under "<systems> together", with each change counted once, in the newest system that has it.
+A project that moved from one system to another (SourceSafe to SVN to Git, CVS to Mercurial, Perforce to Plastic, SVN to Bitbucket to GitLab to Perforce ...), any number of times, often still has the older systems' histories, and the newer ones often hold them too, whole or in part. All the histories found are put together: the scanned folder's (including SourceSafe databases, and a mirror such as Plastic's GitSync), those of repositories inside it, and the old ones named with `--history` (next section). The report shows them under "<systems> together", with each change counted once, in the newest history that has it. Where two histories are of one system, each is named with its folder: "Git (old/bitbucket.git)", "Git (this folder)".
 
 **Finding the same change in two histories**, in this order:
 
-1. **A conversion marker** in one names the change in the other: git-svn's revision number in an SVN history's revisions, git-p4's changelist in Perforce's, git-tfs's changeset in TFVC's, Git Fusion's commit hash in Git's, `hg convert`'s recorded revision, bzr-svn's revision id, hg-git's map.
-2. **The same message within two days** (time zones; a conversion run overnight). The message is its first line, without what conversion tools add (the marker lines above, VSSConverter's date, p4-fusion's changelist number, VSSMigrate's file version), ignoring case and spacing; empty messages and CVS's `*** empty log message ***` match nothing. Where one system only gives the year (TFVC), the same message in the same year.
-3. **The same message of at least 24 characters, found once in each history**, on any date: some conversions date every change the day they ran.
+1. **The same id**, in two histories of Git or of Mercurial, whose ids are hashes of the change: two clones of one repository (a mirror, a backup, a bundle, the repository at its next host). Not revision or changelist numbers (SVN, Perforce, TFVC), which two servers both count from 1.
+2. **A conversion marker** in one names the change in the other: git-svn's revision number in an SVN history's revisions, git-p4's changelist in Perforce's, git-tfs's changeset in TFVC's, Git Fusion's commit hash in Git's, `hg convert`'s recorded revision, bzr-svn's revision id, hg-git's map.
+3. **The same message within two days** (time zones; a conversion run overnight). The message is its first line, without what conversion tools add (the marker lines above, VSSConverter's date, p4-fusion's changelist number, VSSMigrate's file version), ignoring case and spacing; empty messages and CVS's `*** empty log message ***` match nothing. Where one system only gives the year (TFVC), the same message in the same year.
+4. **The same message of at least 24 characters, found once in each history**, on any date: some conversions date every change the day they ran.
 
-**How two histories fit together**, the one that starts first being the older (on the same day, the older system; and Git as the newest, so a mirror of a Git repository is counted in Git):
+**How two histories fit together**, the one that starts first being the older (starting the same day, the one that ends first; ending the same day too, Git as the newest, so a mirror of a Git repository is counted in Git, then the newer system, then the scanned folder's):
 
+- **Copied**: at least half of the older history's changes have the same ids in the newer (both Git, or both Mercurial): the same repository, cloned, mirrored or backed up. Exactly those changes are counted in the newer; the older's others (a branch never pushed) are added.
 - **Converted**: at least half of the older history's changes are in the newer one, or (for histories with too few messages to go by, such as SourceSafe's) the newer starts within 31 days of the older and has changes on at least half of the days the older has them. The older history's changes during the newer one's are counted in the newer; those from before it starts (a partial conversion) or after it ends are added. If the newer dates the converted changes when the conversion ran (half of them more than two days off), all of the older's are taken to be in it.
 - **One after the other**: the older ends on or before the day the newer starts. Both are added (any changes found in both, once).
 - **Overlapping**: both were in use for a while, for the same work: at least a tenth of the older history's changes in that time are in the newer, or one of them has too few messages to tell. That time is counted once, from the newer.
 - **Side by side**: both were in use at the same time with messages that don't match (say, Perforce for the art and Git for the code). Both are counted in full.
 
-With three or more systems, each pair is worked out, and each older history is described with the first newer one that holds its work. A change counted in any newer history isn't counted again, so a chain such as SourceSafe, converted into SVN, converted into Git, counts each change once.
+Dates alone (the rules above for histories with too few messages) only join two histories of the project: the scanned folder's, SourceSafe databases, and the old ones named with `--history`. A repository that is merely inside the scanned folder (a tool's, a library's) may hold any other work, so it is joined with another history only by changes found in both.
+
+With three or more histories, in any number of systems, each pair is worked out, and each older history is described with the first newer one that holds its work. A change counted in any newer history isn't counted again, so a chain such as SVN, converted into Git, copied into Git at another host, converted into Perforce, counts each change once, even where only neighbouring histories have anything to match by (the SVN revisions are found in Git by git-svn's markers, and Git's commits in Perforce by their messages). The order in which the histories were found doesn't matter.
 
 The report gives each history's size and dates, a sentence on how each older one fits with a newer one, and the total ("Together, without counting it twice: N changes from ... to ..."). The summary gives the total and the chain ("SourceSafe, converted into SVN, converted into Git"). In the standard measures, a history wholly held in another isn't counted as another repository, nor are its commits; commits found in two histories are counted once; and the history to deliver is that of the systems still holding something of their own.
 
 **A Git history that starts with a bulk import.** If one of Git's root commits (dated after Git existed) adds at least 300 files, the report notes that the code was copied in from somewhere else and its earlier history isn't in Git.
 
-**Repositories inside the scanned folder** with histories in more than one system are fitted together the same way, in their own section.
+### Old history kept elsewhere (`--history`)
+
+The older histories often aren't in the working copy being scanned: an old SVN server's repository folder or a dump of it, a mirror clone of a Bitbucket repository, a GitLab project export, an old Perforce workspace, a SourceSafe database on a backup disk. `--history <folder or file>` (repeatable) names them. Each folder is searched, without following symbolic links, for:
+
+| What | How it's recognised | How it's read |
+|---|---|---|
+| A working copy or repository of any system in the table above (a submodule in one is found too) | its marker in that folder (old SVN's and CVS's at their top folder only); Perforce: a settings file there, or, for the folder named itself, `p4` | as above, but only from that folder: no marker in a folder above it, Git told not to look above it (`GIT_CEILING_DIRECTORIES`), and no server asked for pull requests |
+| A bare Git repository (`git clone --mirror`, a server's copy) | `HEAD`, `objects` and `refs` | `git log --all`, as above |
+| A Git bundle (`git bundle create`; GitLab's project export holds one, `project.bundle`) | starts `# v2 git bundle` or `# v3 git bundle` | fetched into a temporary bare repository, deleted afterwards; its `HEAD` (else `main`, `master`, the first branch) is the main branch |
+| An SVN repository's own folder (`svnadmin create`) | `format`, and `db` with `fs-type`, `current`, `DB_CONFIG` or `revprops` | each revision's author, date and message straight from `db/revprops`, without `svn`; if they're packed (`svnadmin pack`) or the repository is a Berkeley DB one, `svn log --xml` on its `file://` address, and without `svn` the report says what it couldn't read |
+| An SVN dump (`svnadmin dump`, `svnrdump dump`; full, incremental or with deltas; also compressed with gzip, bzip2 or xz) | starts `SVN-fs-dump-format-version:`. Only files named like a dump or bundle are opened to check (`dump`, `dmp`, `bundle`, `svn`, `.gz`, `.bz2`, `.xz` in the name) | streamed: each revision's properties read, the files' contents skipped; revision 0 left out; every path's revisions counted (branches and tags too). A damaged dump gives the revisions before the damage |
+| A SourceSafe database | `srcsafe.ini` and `data` | with the project's own (above) |
+
+A file named on its own is read if it's a dump or bundle. Each place found gets a section, "Old history named with --history: <where> (<what>)", named from the named folder's own name down (`old/bitbucket.git`), never with the folders above it. Systems that can't be read here (Diversion, Lore ...) are named, asking for an export. A folder named that holds nothing readable says so. Folders named inside the scanned folder are read with it, once, and a named folder that holds the scanned one has the rest of it read. Up to 100 repositories are read from each folder named.
+
+Its histories are then put together with the project's (above). With `--offline`, everything here is still read, except Perforce, Plastic and TFVC workspaces, and SVN working copies of a server, which need their servers.
 
 ### Repositories inside the scanned folder, and engines outside it
 
-- Repositories found inside the scanned folder (say, `Game/` and `Tools/` side by side, or a submodule) get their own history sections, up to ten. Systems that put a marker folder in every folder (old SVN, CVS) are counted once, at their top folder. A repository is not reported twice if it is the same Git repository as the scanned folder.
+- Repositories found inside the scanned folder (say, `Game/` and `Tools/` side by side, an old clone kept in the project, or a submodule) get their own history sections, up to ten. Systems that put a marker folder in every folder (old SVN, CVS) are counted once, at their top folder. A repository is not reported twice if it is the same Git repository as the scanned folder. Their histories are put together with all the others (above).
 - A custom-built Unreal Engine found elsewhere on the computer gets its own section (section 5).
 
 ### Caveats printed with every history
@@ -767,6 +787,7 @@ On Windows, `py` works in place of `python3`, and so does double-clicking the sc
 | `--sql-database NAME` | With `--sql-server`: read only this database instead of every user database. Repeatable; applies to every server named. |
 | `--trust-server-certificate` | With `--sql-server`: trust the server's certificate without checking it (`sqlcmd -C`), for a server you trust that has its own self-signed certificate. |
 | `--sourcesafe PATH` | A Visual SourceSafe database (the folder with `srcsafe.ini`, a copy without it, or its `data` folder) holding this code's history. May be on a network share, except with `--offline`. Repeatable. |
+| `--history PATH` | A folder or file holding older history of this code kept somewhere else: working copies and repositories of any system, bare Git clones, Git bundles, SVN repositories' own folders, SVN dumps, SourceSafe databases (see [Old history kept elsewhere](#old-history-kept-elsewhere---history)). Only what is inside it is read. Must exist; may be on a network share, except with `--offline`. Repeatable. |
 | `--network-sourcesafe` | Also open SourceSafe databases on network shares that the project files name, and a `Data_Path` on a network share in a database's `srcsafe.ini`. Without it they're named on screen but not opened. Can't be combined with `--offline`. |
 | `--offline` | Connect to no other computer: no downloads (a copy of scc or jscpd downloaded before is still used, after its checksum is checked), no version-control servers, no network shares besides the folder scanned, and Access databases aren't opened in Microsoft Access. The report lists what that left out. |
 | `--no-download` | Don't download scc or jscpd. A copy already in the cache is still used; otherwise their figures are left out. |
@@ -775,7 +796,7 @@ On Windows, `py` works in place of `python3`, and so does double-clicking the sc
 
 Environment variables: `SSDIR` names a SourceSafe database; `SQLCMDUSER` and `SQLCMDPASSWORD` are a SQL Server sign-in, used by `sqlcmd`; `ASSETSTORE_CACHE_PATH` is a moved Unity Asset Store cache; `P4CONFIG` is the name of Perforce's settings file. [SECURITY.md](SECURITY.md) lists every variable and setting the script and the tools it runs read.
 
-Notes on parsing: the script stops with a message, before scanning anything, at an argument beginning with `--` that isn't one of the options above ("Unknown option"), at an option that needs a value given last without one, and at `--offline` combined with `--sql-server`, with `--network-sourcesafe`, or with a `--sourcesafe` folder on a network share. Any other argument is taken as a path. `--third-party` and `--own` paths given as relative paths are resolved against each scanned folder in turn.
+Notes on parsing: the script stops with a message, before scanning anything, at an argument beginning with `--` that isn't one of the options above ("Unknown option"), at an option that needs a value given last without one, at a `--history` path that doesn't exist, and at `--offline` combined with `--sql-server`, with `--network-sourcesafe`, or with a `--sourcesafe` or `--history` folder on a network share. Any other argument is taken as a path. `--third-party` and `--own` paths given as relative paths are resolved against each scanned folder in turn.
 
 ---
 

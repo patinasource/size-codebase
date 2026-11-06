@@ -34,6 +34,15 @@ its history is then put together with the others, without counting work that is 
 SourceSafe has no server program: its database is just a folder of files, so a copy of it (from a
 backup or an old disk) works as well as the original, as does its data folder on its own.
 
+Older history kept somewhere else (the project moved from SVN to Bitbucket to GitLab to Perforce
+...): name the folders or files that hold it. Each is searched for working copies and repositories
+of any system above, bare Git clones (git clone --mirror), Git bundles (GitLab's project export
+holds one, project.bundle), SVN repositories' own folders, SVN dumps (svnadmin dump, svnrdump; also
+gzipped, bzip2ed or xz'd) and SourceSafe databases. Nothing outside the folders named is looked
+at, and their servers aren't asked for pull requests. Every history found is put together with the
+project's, through any number of moves, each change counted once; repeatable:
+    python3 size_codebase.py "/path/to/project" --history "/path/to/old repos" --history old-svn.dump.gz
+
 Microsoft Access and SQL Server: Access databases (.accdb, .mdb ...) are read in full on Windows
 with Microsoft Access installed (on a copy, with their macros and code switched off; if Access
 can't switch them off, the database isn't opened), and without their VBA through mdbtools
@@ -97,7 +106,7 @@ Options:
                    files name, and a data folder on a network share that a database's srcsafe.ini
                    names. Without it they're named on screen but not opened, since the project's
                    files could name any computer. Can't be used with --offline.
-  --third-party, --own, --code-ext, --sourcesafe, --sql-server, --sql-database: see above.
+  --third-party, --own, --code-ext, --sourcesafe, --history, --sql-server, --sql-database: see above.
   -h, --help       Show this help.
 
 Needs Python 3.8+ and nothing else (https://www.python.org/downloads/).
@@ -113,7 +122,7 @@ from collections import Counter, defaultdict, namedtuple
 from datetime import datetime, timezone
 from stat import S_ISREG
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 
 # #######################################
@@ -327,10 +336,11 @@ def is_lfs_pointer(path):
 # Temporary folders
 # ##############################
 # The temporary folders this script makes, by what they're for: jscpd's report (it holds copies of
-# the duplicated code) and copies of Access databases, with the PowerShell script that reads them.
+# the duplicated code), copies of Access databases, with the PowerShell script that reads them, and
+# the repository a Git bundle named with --history is read into.
 # Each is deleted as soon as it's done with; one left behind by a run that was stopped (Ctrl-C) is
 # deleted by a later run, once it's a day old (younger ones may belong to a run still going).
-TEMP_PREFIXES = {"jscpd": "size_codebase_jscpd_", "access": "size_codebase_access_"}
+TEMP_PREFIXES = {"jscpd": "size_codebase_jscpd_", "access": "size_codebase_access_", "bundle": "size_codebase_bundle_"}
 TEMP_MAX_AGE = 86400   # seconds
 
 
@@ -523,6 +533,8 @@ def quiet_env():
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never", GIT_NO_LAZY_FETCH="1", HGPLAIN="1",
                HGENCODING="utf-8", HGRCSKIPREPO="1", PYTHONIOENCODING="utf-8", GIT_ALLOW_PROTOCOL="")
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    if _git_ceiling:   # reading old history named with --history: nothing above it
+        env["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(_git_ceiling + [p for p in [env.get("GIT_CEILING_DIRECTORIES")] if p])
     return env
 
 
@@ -2197,12 +2209,16 @@ def git_top(path):
     return os.path.normcase(os.path.abspath(top)) if top else None
 
 
-def git_history(root):
+def git_history(root, servers=True):
+    """root: a working copy (or a folder in one), or a bare repository (a mirror clone, a server's
+    copy). servers: ask the repository's servers for pull requests (not for old history kept
+    elsewhere: see read_history_place)."""
     if run(["git", "rev-parse", "--is-inside-work-tree"], root, 60) is None:
         return None
-    top = (run(["git", "rev-parse", "--show-toplevel"], root, 60) or "").strip()
+    bare = (run(["git", "rev-parse", "--is-bare-repository"], root, 60) or "").strip() == "true"
+    top = "" if bare else (run(["git", "rev-parse", "--show-toplevel"], root, 60) or "").strip()
     try:
-        whole_repo = bool(top) and os.path.samefile(top, root)
+        whole_repo = bare or (bool(top) and os.path.samefile(top, root))
     except OSError:
         whole_repo = False
 
@@ -2237,10 +2253,10 @@ def git_history(root):
     # ####################
     found = scan.reviews_found()
     unreachable = []
-    if OFFLINE:
+    if servers and OFFLINE:
         if git_remotes(root):
             left_out_offline("pull requests on the Git server (asked with git ls-remote and GitHub's gh)")
-    else:
+    elif servers:
         for remote, count in git_server_pull_requests(root, unreachable):
             found.append((f"all pull requests on {remote} (open, closed, merged)", count))
         for remote, count in github_merged_pull_requests(root):
@@ -2530,28 +2546,38 @@ def perforce_history(root):
                    records=records) if changes else None
 
 
+def svn_log_history(out):
+    """The history in svn log --xml's output, or None."""
+    if not out:
+        return None
+    import xml.etree.ElementTree as ET
+    try:
+        return svn_revisions_history((e.get("revision"), e.findtext("date") or "", e.findtext("author"),
+                                      e.findtext("msg") or "") for e in ET.fromstring(out).iter("logentry"))
+    except ET.ParseError:
+        return None
+
+
+def svn_revisions_history(revisions):
+    """The history of (revision, svn:date, svn:author, svn:log) revisions, or None for none."""
+    changes, records, scan = [], [], MessageScan()
+    for revision, date, author, message in revisions:
+        changes.append((date[:10], author or "(no author)"))
+        key, origins, left_out = scan.add(message or "")
+        records.append(Change(date[:10], str(revision), key, origins, not left_out))
+    return history("SVN", "revisions", changes, reviews=scan.reviews_found(), scan=scan,
+                   records=records) if changes else None
+
+
 def svn_history(root):
     """Revisions of the checked-out path, up to the newest on the server: by default svn log stops at
     the revision the checkout was last updated to. Decades of history take a while to fetch."""
     out = run(["svn", "log", "--xml", "--non-interactive", "-r", "HEAD:1", root], root, 7200)
     if not out:   # say, the path is gone at HEAD: the history as far as this checkout goes
         out = run(["svn", "log", "--xml", "--non-interactive", root], root, 7200)
-    if not out:
+    h = svn_log_history(out)
+    if not h:
         return None
-    import xml.etree.ElementTree as ET
-    try:
-        entries = ET.fromstring(out).iter("logentry")
-        changes, records, scan = [], [], MessageScan()
-        for e in entries:
-            date = (e.findtext("date") or "")[:10]
-            changes.append((date, e.findtext("author") or "(no author)"))
-            key, origins, left_out = scan.add(e.findtext("msg") or "")
-            records.append(Change(date, e.get("revision"), key, origins, not left_out))
-    except ET.ParseError:
-        return None
-    if not changes:
-        return None
-    h = history("SVN", "revisions", changes, reviews=scan.reviews_found(), scan=scan, records=records)
     # Which path was counted: forms count trunk's revisions, not those of every branch.
     path = (run(["svn", "info", "--show-item", "relative-url", "--non-interactive", root], root, 120) or "").strip()
     if path.startswith("^/"):
@@ -2898,6 +2924,7 @@ VERSION_CONTROL = [
 ]
 # Their markers in a folder, for spotting repositories inside the scanned folder.
 REPOSITORY_MARKERS = {m: name for name, markers, _, _ in VERSION_CONTROL for m in markers if name != "Visual SourceSafe"}
+EVERY_FOLDER_MARKERS = {".svn", os.path.join("CVS", "Root")}   # old SVN and CVS put their folder in every folder
 
 
 def marker_is(path, marker):
@@ -2918,25 +2945,41 @@ def marker_is(path, marker):
     return os.path.exists(path)
 
 
-def marker_found(root, marker):
+def repository_marker(dirpath, here):
+    """The marker of the repository or working copy whose top folder is dirpath (here: the names in
+    it), or None. Old SVN and CVS put their folder in every folder: only the top one counts."""
+    for marker in REPOSITORY_MARKERS:
+        if marker.split(os.sep)[0] in here and marker_is(os.path.join(dirpath, marker), marker) and (
+                marker not in EVERY_FOLDER_MARKERS or not os.path.exists(os.path.join(os.path.dirname(dirpath), marker))):
+            return marker
+    return None
+
+
+def marker_found(root, marker, levels=6):
     """The marker in root or a folder above it (see find_up), if it's really that system's."""
-    found = nearest(root, marker)
+    found = nearest(root, marker, levels)
     return found is not None and marker_is(found, marker)
 PERFORCE_MARKERS = {".p4config", ".p4ignore", "p4config.txt", "p4ignore.txt", ".p4ignore.txt"}
 
 
-def version_control(root):
-    """(what was found, [history of each]). Something found that can't be read says why."""
+def version_control(root, inside_only=False, ask_perforce=True):
+    """(what was found, [history of each]). Something found that can't be read says why.
+    inside_only: for old history named with --history, only what root itself holds: no markers
+    in the folders above it, no Git repository around it, and no servers asked for pull requests.
+    ask_perforce: ask p4 whether root is in a workspace even without a settings file in it."""
     found, histories = [], []
+    levels = 1 if inside_only else 6
     for name, markers, tools, read in VERSION_CONTROL:
         if name == "Visual SourceSafe":   # read from its database (see SourceSafe), wherever that is
-            if any(find_up(root, m) for m in markers):
+            if any(find_up(root, m, levels) for m in markers):
                 found.append(f"{name} (its history comes from its database: see below)")
             continue
-        if name == "Git":
+        if name == "Git" and inside_only:
+            present = os.path.exists(os.path.join(root, ".git"))
+        elif name == "Git":
             present = run(["git", "-C", root, "rev-parse"], root, 60) is not None or find_up(root, ".git")
         else:
-            present = any(marker_found(root, m) for m in markers)
+            present = any(marker_found(root, m, levels) for m in markers)
         if not present:
             continue
         if name == "Jujutsu" and "Git" in found:
@@ -2954,7 +2997,7 @@ def version_control(root):
             found.append("Mercurial (history not read: this hg is older than 5.4, so it would obey the repository's own"
                          " settings, which can start programs; update Mercurial to include it)")
         else:
-            h = read(root)
+            h = git_history(root, servers=False) if name == "Git" and inside_only else read(root)
             if h:
                 found.append(name)
             elif name == "Git" and run(["git", "rev-parse", "HEAD"], root, 60) is None:
@@ -2967,7 +3010,9 @@ def version_control(root):
     # Perforce
     # ####################
     # Perforce settings often live in the registry or environment rather than a file, so ask p4.
-    p4_marker = any(find_up(root, m) for m in PERFORCE_MARKERS | {os.environ.get("P4CONFIG", ".p4config")})
+    p4_marker = any(find_up(root, m, levels) for m in PERFORCE_MARKERS | {os.environ.get("P4CONFIG", ".p4config")})
+    if not (p4_marker or ask_perforce):
+        return found, [h for h in histories if h]
     if OFFLINE:   # p4 asks the server even whether this folder is in a workspace
         if p4_marker or tool_path("p4"):
             left_out_offline("Perforce: whether this folder is in a Perforce workspace, and its changelists"
@@ -2985,6 +3030,356 @@ def version_control(root):
         found.append("Perforce (no history: is p4 installed and logged in?)" if tool_path("p4")
                      else "Perforce (but the p4 command isn't installed, so no history)")
     return found, [h for h in histories if h]
+
+
+# ##############################
+# Old history kept elsewhere (--history)
+# ##############################
+# A project that moved between systems often keeps its older histories somewhere other than the
+# working copy: an old SVN server's repository folder or a dump of it, a mirror clone of a
+# Bitbucket repository, a GitLab project export (its project.bundle), an old Perforce workspace, a
+# SourceSafe database. --history names folders (or files) holding them. Only what is inside them
+# is read: no folder above them is looked at, Git isn't let look above them for a repository, and
+# their servers aren't asked for pull requests. Their histories are then fitted together with the
+# project's (see across_systems).
+HISTORY_PLACES_MAX = 100   # repositories read from the folders named with --history
+# Files opened to see whether they hold history: only those with such names (a working copy
+# inside a named folder may hold thousands of files).
+HISTORY_FILE_NAME = re.compile(r"dump|dmp|bundle|svn|\.(gz|bz2|xz)$", re.I)
+HISTORY_FILE_HEADS = [(b"SVN-fs-dump-format-version:", "SVN dump"), (b"# v2 git bundle\n", "Git bundle"),
+                      (b"# v3 git bundle\n", "Git bundle")]
+_git_ceiling = []   # while old history is read: the folder above it, which Git mustn't look into (see quiet_env)
+
+
+def open_history_file(path):
+    """A file, read through gzip, bzip2 or xz if it was compressed with one (svnadmin dump | gzip ...)."""
+    with open(path, "rb") as f:
+        magic = f.read(6)
+    if magic.startswith(b"\x1f\x8b"):
+        import gzip
+        return gzip.open(path, "rb")
+    if magic.startswith(b"BZh"):
+        import bz2
+        return bz2.open(path, "rb")
+    if magic.startswith(b"\xfd7zXZ\x00"):
+        import lzma
+        return lzma.open(path, "rb")
+    return open(path, "rb")
+
+
+def history_file_kind(path):
+    """"SVN dump" or "Git bundle" for a file holding one (compressed or not), else None."""
+    try:
+        with open_history_file(path) as f:
+            head = f.read(64)
+    except Exception:   # unreadable, or a damaged compressed file (EOFError, zlib.error, lzma.LZMAError ...)
+        return None
+    return next((kind for start, kind in HISTORY_FILE_HEADS if head.startswith(start)), None)
+
+
+def is_bare_git(path):
+    """A bare Git repository (a mirror clone, a server's copy): HEAD, objects and refs, no work tree."""
+    return all(check(os.path.join(path, name)) for check, name in
+               ((os.path.isfile, "HEAD"), (os.path.isdir, "objects"), (os.path.isdir, "refs")))
+
+
+def is_svn_repository(path):
+    """An SVN repository's own folder (on its server, or a copy of it), as svnadmin create makes it."""
+    db = os.path.join(path, "db")
+    return os.path.isfile(os.path.join(path, "format")) and os.path.isdir(db) and any(
+        os.path.exists(os.path.join(db, name)) for name in ("fs-type", "current", "DB_CONFIG", "revprops"))
+
+
+# ####################
+# SVN properties, as dumps and repositories keep them
+# ####################
+
+def svn_properties(data):
+    """{name: value} from Subversion's property lists: "K <length>" and the name, "V <length>" and
+    the value, for each, ending with PROPS-END (in a dump) or END (in a repository's revprops
+    file); "D <length>" and a name, in an incremental dump, deletes one. ValueError if it isn't one."""
+    props, pos = {}, 0
+
+    def line():
+        nonlocal pos
+        end = data.find(b"\n", pos)
+        if end < 0:
+            raise ValueError("not a Subversion property list")
+        text, pos = data[pos:end], end + 1
+        return text
+
+    def counted(n):
+        nonlocal pos
+        if pos + n > len(data):
+            raise ValueError("not a Subversion property list")
+        text, pos = data[pos:pos + n], pos + n + 1   # and its newline
+        return text.decode("utf-8", "replace")
+
+    while pos < len(data):
+        kind, _, n = line().partition(b" ")
+        if kind in (b"PROPS-END", b"END"):
+            break
+        if kind not in (b"K", b"D") or not n.isdigit():
+            raise ValueError("not a Subversion property list")
+        name = counted(int(n))
+        if kind == b"D":
+            props.pop(name, None)
+            continue
+        kind, _, n = line().partition(b" ")
+        if kind != b"V" or not n.isdigit():
+            raise ValueError("not a Subversion property list")
+        props[name] = counted(int(n))
+    return props
+
+
+def svn_revision(revision, props):
+    return revision, props.get("svn:date", ""), props.get("svn:author"), props.get("svn:log", "")
+
+
+# ####################
+# SVN dumps
+# ####################
+SVN_DUMP_HEADER_MAX = 1 << 16      # bytes in one header line
+SVN_DUMP_PROPERTIES_MAX = 1 << 26  # bytes of one revision's properties (its message, mostly)
+
+
+def svn_dump_revisions(f):
+    """Yields (revision, {property: value}) for each revision in an SVN dump (svnadmin dump,
+    svnrdump; any format, incremental or not), as it streams: the files' contents in between are
+    skipped, never read into memory. Stops at the end of the dump, or where it's damaged."""
+    while True:
+        headers = {}
+        while True:
+            text = f.readline(SVN_DUMP_HEADER_MAX)
+            if not text:
+                return
+            text = text.rstrip(b"\r\n")
+            if not text:
+                if headers:
+                    break
+                continue
+            name, sep, value = text.partition(b": ")
+            if not sep:
+                return   # damaged: not a header
+            headers[name.decode("ascii", "replace")] = value.decode("utf-8", "replace")
+        try:
+            length = int(headers.get("Content-length", 0))
+            prop_length = int(headers.get("Prop-content-length", length if "Revision-number" in headers else 0))
+        except ValueError:
+            return
+        if "Revision-number" in headers:
+            if prop_length > SVN_DUMP_PROPERTIES_MAX:
+                return
+            data = f.read(prop_length)
+            try:
+                props = svn_properties(data)
+                revision = int(headers["Revision-number"])
+            except ValueError:
+                return
+            yield revision, props
+            length -= prop_length
+        if length > 0:
+            f.seek(length, 1)   # a compressed stream reads its way there
+
+
+def svn_dump_history(path):
+    """The revisions in an SVN dump (revision 0, which every repository starts with, left out)."""
+    revisions = []
+    with open_history_file(path) as f:
+        for revision, props in svn_dump_revisions(f):
+            progress(f"Reading the SVN dump {os.path.basename(path)}: {len(revisions):,} revisions")
+            if revision:
+                revisions.append(svn_revision(revision, props))
+    progress()
+    h = svn_revisions_history(revisions)
+    if h:
+        h["notes"].append("Read from a dump: every path's revisions are counted (branches and tags too, not only"
+                          " trunk's).")
+    return h
+
+
+# ####################
+# SVN repositories
+# ####################
+
+def svn_repository_history(path):
+    """(note, history) of an SVN repository's own folder. FSFS keeps each revision's properties
+    (author, date, message) in a small file of its own (db/revprops/<shard>/<revision>), read here
+    directly, so svn needn't be installed and nothing is run on the repository. A repository
+    whose revision properties are packed (svnadmin pack) or kept in Berkeley DB is read with svn
+    log instead, from its file:// address. note: why some of it couldn't be read, or None."""
+    db = os.path.join(path, "db")
+    revprops = os.path.join(db, "revprops")
+    try:
+        with open(os.path.join(db, "fs-type"), encoding="ascii", errors="replace") as f:
+            fs_type = f.read().strip()
+    except OSError:
+        fs_type = "fsfs" if os.path.isdir(revprops) else "bdb"
+    revisions, packed = [], False
+    if fs_type == "fsfs":
+        for dirpath, dirnames, filenames in os.walk(revprops):
+            packed = packed or any(d.endswith(".pack") for d in dirnames) or "revprops.db" in filenames
+            dirnames[:] = [d for d in dirnames if d.isdigit()]
+            for name in filenames:
+                if not name.isdigit() or name == "0":
+                    continue
+                try:
+                    with open(os.path.join(dirpath, name), "rb") as f:
+                        revisions.append(svn_revision(int(name), svn_properties(f.read(SVN_DUMP_PROPERTIES_MAX))))
+                except (OSError, ValueError):
+                    continue
+    if fs_type == "fsfs" and not packed:
+        return None, svn_revisions_history(sorted(revisions))
+    if not tool_path("svn"):
+        why = ("its older revisions are packed (svnadmin pack)" if packed else "it keeps its history in Berkeley DB")
+        return (f"SVN repository: {why}, which needs the svn command to read, and it isn't installed"
+                + (f"; read the {len(revisions):,} revisions that aren't" if revisions else "")), \
+            svn_revisions_history(sorted(revisions))
+    import pathlib
+    url = pathlib.Path(os.path.abspath(path)).as_uri()
+    return None, svn_log_history(run(["svn", "log", "--xml", "--non-interactive", "-r", "HEAD:1", url], path, 7200))
+
+
+# ####################
+# Git bundles
+# ####################
+
+def git_bundle_history(path):
+    """A Git bundle's history (git bundle create; GitLab's project export holds one, project.bundle),
+    fetched into a temporary bare repository, deleted afterwards. Its HEAD is the bundle's, if it
+    has one, else main, master or the first branch."""
+    tmp = temp_folder("bundle")
+    try:
+        bundle = os.path.abspath(path)
+        if run(["git", "init", "-q", "--bare", tmp], tmp, 60) is None:
+            return None
+        # A bundle is read through Git's "file" transport, which quiet_env otherwise turns off.
+        if run(["git", "fetch", "-q", bundle, "+refs/*:refs/*"], tmp, 7200, env={"GIT_ALLOW_PROTOCOL": "file"}) is None:
+            return None
+        heads = [line.split(None, 1) for line in (run(["git", "bundle", "list-heads", bundle], tmp, 600) or "").splitlines()
+                 if len(line.split(None, 1)) == 2]
+        head = next((sha for sha, ref in heads if ref == "HEAD"), None)
+        branches = [ref for _, ref in heads if ref.startswith("refs/heads/")]
+        branch = next((ref for sha, ref in heads if sha == head and ref.startswith("refs/heads/")), None) or next(
+            (ref for ref in ("refs/heads/main", "refs/heads/master") if ref in branches), branches[0] if branches else None)
+        if branch:
+            run(["git", "symbolic-ref", "HEAD", branch], tmp, 60)
+        return git_history(tmp, servers=False)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ####################
+# Finding it in the folders named
+# ####################
+
+def history_places(named):
+    """[(path, kind)] of the history in a folder named with --history, or the one file named:
+    kinds "working copy" (of any system version_control knows; the named folder itself is always
+    looked at), "bare Git", "Git bundle", "SVN repository", "SVN dump" and "SourceSafe" (a
+    database). Repositories inside working copies (submodules ...) are found too. Nothing
+    outside named is looked at, and symbolic links aren't followed."""
+    named = os.path.abspath(named)
+    if os.path.isfile(named):
+        return [(named, history_file_kind(named) or "unknown file")]
+    places = []
+    for dirpath, dirnames, filenames in os.walk(long_path(named)):
+        path = short_path(dirpath)
+        here = set(dirnames) | set(filenames)
+        dirnames[:] = sorted(d for d in dirnames if d.lower() not in ALWAYS_SKIP and not is_link(os.path.join(dirpath, d)))
+        kind = ("bare Git" if is_bare_git(path) else "SVN repository" if is_svn_repository(path) else
+                "SourceSafe" if is_vss_database(path) else None)
+        if kind:
+            places.append((path, kind))
+            dirnames[:] = []
+            continue
+        if path == named or {f.lower() for f in filenames} & PERFORCE_MARKERS or repository_marker(dirpath, here):
+            places.append((path, "working copy"))
+        for name in sorted(filenames):
+            if HISTORY_FILE_NAME.search(name) and not is_link(os.path.join(dirpath, name)):
+                kind = history_file_kind(os.path.join(path, name))
+                if kind:
+                    places.append((os.path.join(path, name), kind))
+    return places
+
+
+def read_history_place(path, kind, top):
+    """(what was found, [history]) at one of history_places' places. top: the folder named itself
+    (whether it's in a Perforce workspace is asked even without a settings file in it)."""
+    _git_ceiling.append(os.path.dirname(os.path.abspath(path)))
+    try:
+        if kind == "working copy":
+            return version_control(path, inside_only=True, ask_perforce=top)
+        if kind in ("bare Git", "Git bundle"):
+            what = "Git (a bare repository)" if kind == "bare Git" else "Git (a bundle)"
+            if not tool_path("git"):
+                return [f"{what} (but the git command isn't installed, so no history)"], []
+            h = git_history(path, servers=False) if kind == "bare Git" else git_bundle_history(path)
+            return [what if h else f"{what} (no history could be read)"], [h] if h else []
+        if kind == "SVN repository":
+            note, h = svn_repository_history(path)
+            return [("SVN (a repository's own folder)" if h else "SVN (a repository's own folder, no history could be"
+                     " read)") + (f": {note}" if note else "")], [h] if h else []
+        if kind == "SVN dump":
+            h = svn_dump_history(path)
+            return ["SVN (a dump)" if h else "SVN (a dump, but no revisions could be read from it)"], [h] if h else []
+        return ["nothing this script can read (not a repository, an SVN dump or a Git bundle)"], []
+    finally:
+        _git_ceiling.pop()
+
+
+def history_label(named, path):
+    """How the report names a place in a folder named with --history: from the named folder's own
+    name down ("old/bitbucket"), never the folders above it."""
+    named = os.path.abspath(named)
+    rel = os.path.relpath(os.path.abspath(path), os.path.dirname(named))
+    return rel.replace(os.sep, "/")
+
+
+def named_history_lines(root, named_places, histories, problems):
+    """The report's part on the old history named with --history (named_places: [(folder or file
+    named, its history_places)]): what was found in each, and the histories, added to histories
+    to be fitted together with the others (see across_systems). SourceSafe databases are read with
+    the project's (see sourcesafe_lines); what is inside the folder scanned, with it."""
+    out, read = [], set()
+    for named, places in named_places:
+        named = os.path.abspath(named)
+        if is_within(named, root):
+            out += ["", f"Old history named with --history: {history_label(named, named)} is inside the folder scanned,"
+                        " so it's read with it."]
+            continue
+        shown = 0
+        for path, kind in places:
+            if kind == "SourceSafe":
+                shown += 1
+                continue
+            key = os.path.normcase(os.path.abspath(path))
+            if is_within(path, root) or key in read:   # in the folder scanned (read with it), or named twice
+                shown += 1
+                continue
+            read.add(key)
+            label = history_label(named, path)
+            try:
+                found, hs = read_history_place(path, kind, top=os.path.abspath(path) == named)
+            except Exception as e:
+                problems.append(f"reading the history named with --history in {label}: {describe(e, root)}")
+                continue
+            if not found:   # the folder named isn't a repository itself, nor in a Perforce workspace
+                continue
+            shown += 1
+            if shown > HISTORY_PLACES_MAX:
+                continue
+            out += ["", f"Old history named with --history: {label} ({', '.join(found)})"]
+            for h in hs:
+                h["where"], h["named"] = label, True
+                out += [f"  History ({h['vcs']}):"] + history_lines(h, "  ")
+                histories.append(h)
+        if not shown:
+            out += ["", f"Old history named with --history: {history_label(named, named)}: no repository, working copy, SVN"
+                        " dump, Git bundle or SourceSafe database found in it."]
+        elif shown > HISTORY_PLACES_MAX:
+            out.append(f"(and {shown - HISTORY_PLACES_MAX} more repositories in {history_label(named, named)}, not read)")
+    return out
 
 
 # ##############################
@@ -3023,22 +3418,34 @@ HISTORY_CAVEATS = [
 # ##############################
 # A project that moved from one system to another (SourceSafe to SVN to Git, CVS to Mercurial,
 # Perforce to Plastic ...), maybe more than once, often has an older system's history, whole or in
-# part, inside a newer one's too, and may still have both. Before the histories of one folder are
-# added together, each change in more than one of them is found and counted once, in the newest:
-# by the original change a conversion tool's marker names (git-svn's revision, git-p4's changelist,
-# hg convert's ...), by the same message within a couple of days, or by the same long message on any
-# date (some conversions date every change the day they ran). Where messages are too few to go by
-# (SourceSafe's are often empty), the histories are fitted together by their dates.
+# part, inside a newer one's too, and may still have both: in the folder scanned, in repositories
+# inside it, and in the old histories named with --history. Before all of them are added together,
+# each change in more than one of them is found and counted once, in the newest: by the same id (a
+# Git or Mercurial commit in two clones), by the original change a conversion tool's marker names
+# (git-svn's revision, git-p4's changelist, hg convert's ...), by the same message within a couple
+# of days, or by the same long message on any date (some conversions date every change the day they
+# ran). Where messages are too few to go by (SourceSafe's are often empty), the histories of the
+# project are fitted together by their dates; a repository that is merely inside the folder scanned
+# (a tool's, a library's) only by its changes.
 SAME_CHANGE_DAYS = 2    # one change's date in two systems differs by time zone, or a conversion run overnight
 DISTINCT_MESSAGE = 24   # characters: a message this long, found once in each history, is the same change
 CONVERTED_SHARE = 0.5   # of the older history's changes in the newer one: it was converted into it
 SAME_WORK_SHARE = 0.1   # of the older history's changes while both were in use: they hold the same work
 COMMON_MESSAGE_TIMES, COMMON_MESSAGE_SHARE = 3, 0.01   # a message more changes than both have says nothing
 SHORT_NAMES = {"Visual SourceSafe": "SourceSafe", "Team Foundation (TFVC)": "TFVC"}
+SAME_ID_SYSTEMS = {"Git", "Mercurial"}   # whose ids are hashes of the change: the same id in two histories is the same change
 
 
 def short_name(vcs):
     return SHORT_NAMES.get(vcs, vcs)
+
+
+def history_names(hs):
+    """What the report calls each history: its system's short name, and where it is if another
+    history is of the same system ("Git (old/bitbucket)", "Git (this folder)")."""
+    names = [short_name(h["vcs"]) for h in hs]
+    return [f"{name} ({h.get('where') or 'this folder'})" if names.count(name) > 1 else name
+            for name, h in zip(names, hs)]
 
 
 def change_unit(h):
@@ -3061,8 +3468,8 @@ def day_number(date):
 
 
 def same_changes(old, new):
-    """({old's change: new's change}, how many of them a conversion marker named) for the changes
-    in both histories, as indexes into their records."""
+    """({old's change: new's change}, (how many of them have the same id, how many a conversion
+    marker named)) for the changes in both histories, as indexes into their records."""
     a, b = old["records"], new["records"]
     pairs, taken = {}, set()
 
@@ -3071,10 +3478,20 @@ def same_changes(old, new):
         taken.add(j)
 
     # ####################
-    # Named by a conversion marker, either way round
+    # The same commit, in two clones of a repository
     # ####################
     a_ids = {r.id: i for i, r in enumerate(a) if r.id}
     b_ids = {r.id: j for j, r in enumerate(b) if r.id}
+    if old["vcs"] == new["vcs"] in SAME_ID_SYSTEMS:
+        for i, r in enumerate(a):
+            j = b_ids.get(r.id) if r.id else None
+            if j is not None and j not in taken:
+                pair(i, j)
+    same_id = len(pairs)
+
+    # ####################
+    # Named by a conversion marker, either way round
+    # ####################
     for j, r in enumerate(b):
         for vcs, number in r.origins:
             i = a_ids.get(number) if vcs == old["vcs"] else None
@@ -3085,7 +3502,7 @@ def same_changes(old, new):
             j = b_ids.get(number) if vcs == new["vcs"] else None
             if j is not None and i not in pairs and j not in taken:
                 pair(i, j)
-    marked = len(pairs)
+    marked = len(pairs) - same_id
 
     # ####################
     # The same message, within SAME_CHANGE_DAYS, or in the same year where a date is only the year
@@ -3125,16 +3542,18 @@ def same_changes(old, new):
         j = b_once.get(r.key) if a_count[r.key] == 1 else None
         if j is not None and i not in pairs and j not in taken:
             pair(i, j)
-    return pairs, marked
+    return pairs, (same_id, marked)
 
 
-def how_related(old, new, pairs):
-    """How two histories of one folder fit together, old's starting first: {"kind", "counted":
+def how_related(old, new, pairs, by_dates=True):
+    """How two histories fit together, old's starting first: {"kind", "counted":
     old's changes (indexes) that are counted in new's, "during": old's changes while new was in
     use, "shared": the share of old's days on which new has changes too, "redated": whether new
     dated the changes converted from old when the conversion ran}. Kinds: "converted" (new holds
     old's history), "one after the other", "overlapping" (both in use for a while, for the same
-    work) and "side by side" (both in use, for different work)."""
+    work) and "side by side" (both in use, for different work). by_dates: whether their dates
+    alone may say they hold the same work, where messages are too few to go by (only for two
+    histories of the project, not for a repository that is merely inside the folder scanned)."""
     a, b = old["records"], new["records"]
     lo, hi = date_range(new["dates"][0])[0], date_range(new["dates"][-1])[1]
     during = {i for i, r in enumerate(a) if r.date and date_range(r.date)[1] >= lo and date_range(r.date)[0] <= hi}
@@ -3148,7 +3567,7 @@ def how_related(old, new, pairs):
     matched = set(pairs)
     out = {"during": during, "shared": shared, "redated": redated}
     # Dates alone only say something where there are too few messages to go by.
-    with_messages = all(sum(1 for r in h["records"] if r.key) >= len(h["records"]) / 2 for h in (old, new))
+    with_messages = not by_dates or all(sum(1 for r in h["records"] if r.key) >= len(h["records"]) / 2 for h in (old, new))
     if len(pairs) >= CONVERTED_SHARE * len(a) or (not with_messages and starts_together and shared >= CONVERTED_SHARE):
         return dict(out, kind="converted", counted=set(range(len(a))) if redated else matched | during)
     if date_range(old["dates"][-1])[1] <= lo:
@@ -3158,17 +3577,27 @@ def how_related(old, new, pairs):
     return dict(out, kind="side by side", counted=matched)
 
 
-def relation_text(old, new, pairs, marked, rel):
-    """The report's sentence on how old's history fits with new's (see how_related)."""
-    o, n, ou, nu = short_name(old["vcs"]), short_name(new["vcs"]), change_unit(old), change_unit(new)
+def relation_text(old, new, pairs, matched, rel, o, n):
+    """The report's sentence on how old's history fits with new's (see how_related). matched: how
+    many pairs have the same id, how many a conversion marker named (see same_changes); o, n: the
+    histories' names (see history_names)."""
+    (same_id, marked), ou, nu = matched, change_unit(old), change_unit(new)
     during, n_old = rel["during"], len(old["records"])
     both_to = min(old["dates"][-1], new["dates"][-1])
     new_during = sum(1 for r in new["records"] if r.date and date_range(r.date)[0] <= date_range(both_to)[1])
     alike = len(set(pairs) & during)
-    if rel["kind"] == "converted":
+    if rel["kind"] == "copied":
+        text = (f"{n} holds a copy of the {o} history: {same_id:,} of its {n_old:,} {ou} are in {n} too, with the same ids,"
+                f" so they're the same repository (a clone, a mirror or a backup).")
+        rest = n_old - len(rel["counted"])
+        text += (f" The {n} numbers are the whole history; don't add the {o} {ou} to them." if not rest else
+                 f" {rest:,} of the {o} {ou} aren't in {n}, so they're added.")
+    elif rel["kind"] == "converted":
         if len(pairs) >= CONVERTED_SHARE * n_old:
-            how = ", ".join(part for part in (f"{marked:,} by the conversion tool's markers" if marked else "",
-                                              f"{len(pairs) - marked:,} by their messages" if len(pairs) > marked else "")
+            rest = len(pairs) - same_id - marked
+            how = ", ".join(part for part in (f"{same_id:,} by their ids" if same_id else "",
+                                              f"{marked:,} by the conversion tool's markers" if marked else "",
+                                              f"{rest:,} by their messages" if rest else "")
                             if part)
             why = f"{len(pairs):,} of its {n_old:,} {ou} are in {n} too ({how})"
         else:
@@ -3197,19 +3626,24 @@ def relation_text(old, new, pairs, marked, rel):
 
 
 def across_systems(histories):
-    """(report lines, (changes, first, last, how)) for one folder's histories in more than one
-    system (or more than one history of a system), each change counted once; ([], None) for fewer
-    than two. Marks each history: "counted_elsewhere" (its changes counted in a newer one's),
-    "standard_duplicates" (how many of them forms would count) and "held_by" (the system whose
-    history holds all of it)."""
+    """(report lines, (changes, first, last, how)) for the histories found, in any number of
+    systems and folders, each change counted once; ([], None) for fewer than two. A history's
+    "group" is "project" (the folder scanned, SourceSafe databases and the old histories named
+    with --history), or the repository inside the folder scanned that it's in; its "where", the
+    folder it's in, to tell two of one system apart. Marks each history: "counted_elsewhere" (its
+    changes counted in a newer one's), "standard_duplicates" (how many of them forms would count)
+    and "held_by" (the history that holds all of it)."""
     import textwrap
     hs = [h for h in histories if h.get("dates")]
     if len(hs) < 2:
         return [], None
-    # Oldest first. Starting the same day, the older system's history was converted into the newer
-    # one's, and Git's is taken as the newest: a mirror of it (Plastic's GitSync ...) is counted in Git.
-    hs.sort(key=lambda h: (date_range(h["dates"][0])[0], h["vcs"] == "Git", SYSTEM_RELEASED.get(h["vcs"], ("9999",))[0]))
-    names = [short_name(h["vcs"]) for h in hs]
+    # Oldest first. Starting the same day, one was converted into the other (or copied), keeping the
+    # dates: the newer is the one that went on longer, and, ending the same day too, Git's is taken
+    # as the newest (a mirror of it, Plastic's GitSync ..., is counted in Git), then the newer
+    # system's, then the folder scanned's (the one in use).
+    hs.sort(key=lambda h: (date_range(h["dates"][0])[0], date_range(h["dates"][-1])[1], h["vcs"] == "Git",
+                           SYSTEM_RELEASED.get(h["vcs"], ("9999",))[0], not h.get("where")))
+    names = history_names(hs)
     width = max(len(name) for name in names) + 1
     out = [f"  {name + ':':<{width}} {len(h['records']):,} {change_unit(h)}, {h['dates'][0]} to {h['dates'][-1]}"
            for name, h in zip(names, hs)]
@@ -3225,12 +3659,16 @@ def across_systems(histories):
         texts = []
         for y in range(x + 1, len(hs)):
             new = hs[y]
-            pairs, marked = same_changes(old, new)
-            rel = how_related(old, new, pairs)
+            pairs, matched = same_changes(old, new)
+            rel = how_related(old, new, pairs, by_dates=old.get("group", "project") == new.get("group", "project"))
+            if rel["kind"] == "converted" and matched[0] >= CONVERTED_SHARE * len(old["records"]):
+                # The same commits: a clone of the repository, not a conversion. Its ids say exactly
+                # which are in both; the others (a branch never pushed ...) are added.
+                rel.update(kind="copied", counted=set(pairs))
             kinds[x, y] = rel["kind"]
             counted_elsewhere[x] |= rel["counted"]
-            texts.append(relation_text(old, new, pairs, marked, rel))
-            if rel["kind"] in ("converted", "overlapping") and rel["counted"] and holders[x] is None:
+            texts.append(relation_text(old, new, pairs, matched, rel, names[x], names[y]))
+            if rel["kind"] in ("copied", "converted", "overlapping") and rel["counted"] and holders[x] is None:
                 holders[x] = names[y]
                 texts = [texts[-1]]
         for text in texts[:1]:
@@ -3243,8 +3681,8 @@ def across_systems(histories):
     first, last = min(h["dates"][0] for h in hs), max(h["dates"][-1] for h in hs)
     out.append(f"  Together{', without counting it twice' if any(counted_elsewhere) else ''}: {total:,} changes from"
                f" {first} to {last}.")
-    joins = {"converted": ", converted into {}", "one after the other": ", then {}", "overlapping": " and {}, overlapping",
-             "side by side": " and {}, side by side"}
+    joins = {"copied": ", copied into {}", "converted": ", converted into {}", "one after the other": ", then {}",
+             "overlapping": " and {}, overlapping", "side by side": " and {}, side by side"}
     how = names[0] + "".join(joins[kinds[y - 1, y]].format(names[y]) for y in range(1, len(hs)))
     for h, c, holder in zip(hs, counted_elsewhere, holders):
         h["counted_elsewhere"] = c
@@ -3532,10 +3970,11 @@ def imported_git_history(root, h):
 # Report section
 # ##############################
 
-def sourcesafe_lines(root, vss, git_h, histories, alerts):
+def sourcesafe_lines(root, vss, git_h, histories, alerts, named=None):
     """The report's SourceSafe part: each database's history (added to histories, to be fitted
     together with the others: see across_systems), or, when the code was in SourceSafe but the
-    database isn't here, how to include it."""
+    database isn't here, how to include it. named: {database: its label} for those found in the
+    folders named with --history."""
 
     # ####################
     # The databases found
@@ -3551,8 +3990,12 @@ def sourcesafe_lines(root, vss, git_h, histories, alerts):
         reachable = os.path.isfile(os.path.join(where, "srcsafe.ini"))
         print(f"SourceSafe database named in the project files (shown here only, not saved in the report): {where}"
               + ("" if reachable else " (not reachable from this computer)"))
-    for _, h in found:
-        out += ["", "Version control history (Visual SourceSafe database):"] + history_lines(h)
+    for db, h in found:
+        label = (named or {}).get(os.path.normcase(os.path.abspath(db)))
+        h["where"] = label or os.path.basename(os.path.normpath(db))
+        h["named"] = bool(label)
+        heading = f"Old history named with --history: {label}" if label else "Version control history"
+        out += ["", f"{heading} (Visual SourceSafe database):"] + history_lines(h)
         histories.append(h)
     imported = imported_git_history(root, git_h) if git_h else None
 
@@ -6275,12 +6718,13 @@ def standard_measures_report(histories, vcs_found, tools, missing, left_out, own
 # Sizing a project
 # #######################################
 
-def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=None, sourcesafe=()):
+def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=None, sourcesafe=(), history=()):
     """The report for one folder. third_party / own: folders or files (relative to root, or
     absolute) that the user says are someone else's code, or their own. facts: a dict to fill
     with the report's numbers, for the machine-readable copy. only: the one file in root to
     look at (e.g. an Access database given on its own), instead of the whole folder.
-    sourcesafe: SourceSafe databases elsewhere (folders with srcsafe.ini) that hold its history."""
+    sourcesafe: SourceSafe databases elsewhere (folders with srcsafe.ini) that hold its history.
+    history: folders or files elsewhere holding its older history (see history_places)."""
 
     # ##############################
     # Setting up
@@ -6321,7 +6765,15 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     unknown_text = defaultdict(lambda: [0, 0])   # text files of unknown kinds among the studio's own: [files, bytes]
     textual = {}            # extension -> whether its files are text
     not_own_files = []      # someone else's files among the studio's own
-    vss = SourceSafe(sourcesafe)
+    named_places = []       # (folder or file named with --history, the history found in it)
+    for named in history:
+        try:
+            named_places.append((named, history_places(named)))
+        except Exception as e:
+            problems.append(f"looking for the history named with --history: {describe(e, root)}")
+    named_vss = {os.path.normcase(os.path.abspath(path)): history_label(named, path)
+                 for named, places in named_places for path, kind in places if kind == "SourceSafe"}
+    vss = SourceSafe(list(sourcesafe) + list(named_vss))
     dac_packages = []       # (category, contents) of .dacpac / .bacpac files, counted once .sql names are known
     digests = set()
     duplicates = [0, 0]     # own files that are exact copies of another one: [files, lines]
@@ -6441,15 +6893,8 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         # ####################
         # Repositories inside the scanned folder
         # ####################
-        if rel != "." and category in ("own", "test"):
-            here = set(dirnames) | set(filenames)
-            for marker, name in REPOSITORY_MARKERS.items():
-                first = marker.split(os.sep)[0]
-                # Old SVN, CVS and SourceSafe put their folder in every folder: only the top one counts.
-                if first in here and marker_is(os.path.join(dirpath, marker), marker) and \
-                        not os.path.exists(os.path.join(os.path.dirname(dirpath), marker)):
-                    nested_repos.append((rel, short_path(dirpath)))
-                    break
+        if rel != "." and category in ("own", "test") and repository_marker(dirpath, set(dirnames) | set(filenames)):
+            nested_repos.append((rel, short_path(dirpath)))
 
         # ####################
         # Which subfolders to enter, and as whose code
@@ -7048,15 +7493,14 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         out += ["", f"Version control history ({h['vcs']}):"] + history_lines(h)
     combined = None
     try:
-        out += sourcesafe_lines(root, vss, git_h, histories, alerts)
+        out += named_history_lines(root, named_places, histories, problems)
+    except Exception as e:
+        problems.append(f"reading the history named with --history: {describe(e, root)}")
+    try:
+        out += sourcesafe_lines(root, vss, git_h, histories, alerts, named_vss)
     except Exception as e:
         problems.append(f"reading the SourceSafe history: {describe(e, root)}")
-    try:   # one folder's histories in more than one system: how they fit together, each change counted once
-        lines, combined = across_systems(histories)
-        out += lines
-    except Exception as e:
-        problems.append(f"fitting the histories of the different systems together: {describe(e, root)}")
-    if not histories:
+    if not any(not h.get("named") for h in histories):
         if mtimes and mtimes[1] - mtimes[0] < 86400:
             day = datetime.fromtimestamp(mtimes[0], timezone.utc).strftime("%Y-%m-%d")
             out += ["", f"File dates are all from {day}: that's when these files were copied or unzipped, not when the"
@@ -7064,7 +7508,9 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         elif years:
             out += ["", f"Source files last modified: {min(years)}–{max(years)} "
                         "(file dates only; can be reset by copying)"]
-        out.append("No version-control history found here, so no commit or pull-request counts.")
+        out.append("No version-control history in the folder scanned itself: only the old history named with --history."
+                   if histories else "No version-control history found here, so no commit or pull-request counts.")
+    if not histories:
         if ARCHIVE_NAME.search(os.path.basename(root)) or (mtimes and mtimes[1] - mtimes[0] < 3600 and
                                                             sum(len(f) for f in deps.files.values()) >= 20):
             out += ["", "NOTE: This looks like a downloaded copy (such as GitHub's \"Download ZIP\") rather than the",
@@ -7143,14 +7589,22 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
             continue
         out += ["", f"Repository inside this folder: {rel.replace(os.sep, '/')} ({', '.join(vcs) or 'unreadable'})"]
         for h in nested:
+            h["where"], h["group"] = rel.replace(os.sep, "/"), "inside " + rel
             out += [f"  History ({h['vcs']}):"] + history_lines(h, "  ")
             histories.append(h)
-        try:
-            out += ["  " + line if line else line for line in across_systems(nested)[0][1:]]
-        except Exception as e:
-            problems.append(f"fitting the histories of {rel} together: {describe(e, root)}")
     if shown > 10:
         out.append(f"(and {shown - 10} more repositories inside this folder, not listed)")
+
+    # ####################
+    # All the histories together
+    # ####################
+    # The folder's own, SourceSafe's, the old ones named with --history and the repositories inside
+    # the folder, in any number of systems: how they fit together, each change counted once.
+    try:
+        lines, combined = across_systems(histories)
+        out += lines
+    except Exception as e:
+        problems.append(f"fitting the histories of the different systems together: {describe(e, root)}")
 
     # ####################
     # Caveats about the history
@@ -7292,7 +7746,8 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
             "version_control": vcs_found,
             "histories": [{"vcs": h["vcs"], "rows": dict(h["rows"]), "reviews": dict(h["reviews"]),
                            "notes": h.get("notes", []), "changes_counted_in_another_history": len(h.get("counted_elsewhere", ())),
-                           "held_by": h.get("held_by")} for h in histories],
+                           "held_by": h.get("held_by"), "where": h.get("where"),
+                           "named_with_history": bool(h.get("named"))} for h in histories],
             "history_across_systems": dict(zip(("changes", "first", "last", "how"), combined)) if combined else None,
             "contributors": {"version_control": people_all if histories else None, "named_in_code": named},
             "dependencies_not_here": {"unknown": unknown_deps, "packages": {k: sorted(v) for k, v in deps.packages.items()},
@@ -7373,7 +7828,7 @@ def write_report_file(path, text):
         f.write(text)
 
 
-def scan(root, here, third_party=(), own=(), sql_servers=(), sourcesafe=()):
+def scan(root, here, third_party=(), own=(), sql_servers=(), sourcesafe=(), history=()):
     root = dropped_path(root)
     only = None
     if os.path.isfile(root):   # a single file, e.g. an Access database: just that file, from its folder
@@ -7383,7 +7838,7 @@ def scan(root, here, third_party=(), own=(), sql_servers=(), sourcesafe=()):
         return
     print(f"Scanning {os.path.join(root, only) if only else root} ... (large projects can take a few minutes)")
     facts = {}
-    report = size_project(root, third_party, own, facts, sql_servers, only, sourcesafe)
+    report = size_project(root, third_party, own, facts, sql_servers, only, sourcesafe, history)
     print("\n" + report + "\n")
     name = "".join(c if c.isalnum() else "_" for c in only or os.path.basename(os.path.abspath(root)))
     out_path = save_report(report, name, here, facts)
@@ -7417,7 +7872,7 @@ def main():
     global FETCH_TOOLS, KEEP_TOOL_REPORTS, OFFLINE, TRUST_SERVER_CERTIFICATE, NETWORK_SOURCESAFE
     roots, args = [], sys.argv[1:]
     marks = {"--third-party": [], "--own": [], "--sql-server": [], "--sql-database": [], "--sourcesafe": [],
-             "--code-ext": []}
+             "--code-ext": [], "--history": []}
     while args:
         arg = args.pop(0)
         if arg in ("-h", "--help"):
@@ -7447,6 +7902,10 @@ def main():
             add_code_extension(spec)
         except ValueError as e:
             stop(str(e))
+    marks["--history"] = [path if os.path.exists(path) else dropped_path(path) for path in marks["--history"]]
+    for path in marks["--history"]:
+        if not os.path.exists(path):
+            stop(f"--history names {path}, which isn't a folder or file here.")
 
     # ####################
     # Options that contradict --offline
@@ -7457,6 +7916,9 @@ def main():
     if OFFLINE and any(is_network_path(db) for db in marks["--sourcesafe"]):
         stop("--sourcesafe names a folder on a network share, and --offline says not to connect to any other"
              " computer. Leave out one of the two, or name a copy of the database on this computer.")
+    if OFFLINE and any(is_network_path(path) for path in marks["--history"]):
+        stop("--history names a folder on a network share, and --offline says not to connect to any other computer."
+             " Leave out one of the two, or name a copy of it on this computer.")
     if OFFLINE and NETWORK_SOURCESAFE:
         stop("--network-sourcesafe opens SourceSafe databases on network shares, and --offline says not to connect"
              " to any other computer. Leave out one of the two.")
@@ -7467,7 +7929,7 @@ def main():
     # ####################
     if roots:
         for root in roots:
-            scan(root, here, marks["--third-party"], marks["--own"], sql_servers, marks["--sourcesafe"])
+            scan(root, here, marks["--third-party"], marks["--own"], sql_servers, marks["--sourcesafe"], marks["--history"])
         return
 
     # ####################
