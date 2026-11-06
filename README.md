@@ -4,8 +4,10 @@ This is an all-in-one inventory taker meant to deal with a large number of cases
 codebases that are actually all in one file, such as those built with the Unity game engine or
 with Microsoft Access, projects that have switched between multiple version control systems, and
 codebases where libraries copied in from elsewhere sit among the owner's own code. It counts your
-code by language and your version-control history (commits, contributors, pull requests), and
-keeps engine code, plugins and third-party libraries out of your totals.
+code by language and your version-control history (commits, contributors, pull requests, reviews),
+and keeps engine code, plugins and third-party libraries out of your totals. For a game, it also
+says what the assets are (characters, items, props, levels in the build), which online services
+the game uses, and whether there are automated tests and build automation.
 
 ## Running it
 
@@ -19,14 +21,36 @@ keeps engine code, plugins and third-party libraries out of your totals.
 3. It saves `size_report_<folder>.txt` and `size_report_<folder>.json` next to the script. Send
    both to whoever asked you to run it.
 
-It only reads files and uploads nothing. The report holds counts and the names of folders,
-languages and libraries: no source code and no author names. Please read it before you send it.
+It only reads files, uploads nothing and downloads nothing. The report holds counts and the names of folders,
+languages and libraries (and of the online services and tools it recognises): no source code, no
+author names, no file or class names and no web addresses. Please read it before you send it.
 Point it at the real project, not a build or a ZIP download (a ZIP has no history), and if your
 history is in Perforce, Plastic or SVN, run it inside your workspace while logged in so it can read
-it. If older history is kept somewhere else (an old SVN dump, a mirror of a Bitbucket repository, a
-GitLab export, an old Perforce workspace), name it with `--history "<folder or file>"`: the script
-puts every history together, counting each change once however many times the project moved. If your tests measure code coverage, run them with coverage turned on first: the script reads
+it. If your tests measure code coverage, run them with coverage turned on first: the script reads
 the report they leave (it never runs your tests itself).
+
+## Options
+
+Most projects need none. The ones people reach for:
+
+- **`--history "<folder or file>"`**: older history kept somewhere else, if the project moved
+  between version-control systems (an old SVN dump or server folder, a mirror of a Bitbucket
+  repository, a GitLab export, an old Perforce workspace). Give it once per place, or put them all
+  in one folder and name that. Every history is put together with the project's, counting each
+  change once however many times the project moved:
+
+  ```
+  python3 size_codebase.py "/path/to/project" --history "/path/to/old svn.dump" --history "/path/to/old-git-mirror"
+  ```
+
+- **`--third-party <folder>`** and **`--own <folder>`**: correct what it counts as someone
+  else's code, or as yours.
+- **`--offline`**: connect to no other computer at all.
+
+[MANUAL.md](MANUAL.md) explains every option, with examples, and what the script saves and
+connects to.
+
+## More
 
 For everything it handles and where it can go wrong, see [HOW_IT_WORKS.md](HOW_IT_WORKS.md). For
 every connection it makes, every program it runs and how to verify your copy, see

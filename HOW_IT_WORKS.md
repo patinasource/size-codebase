@@ -1,6 +1,6 @@
 # How size_codebase.py works
 
-`size_codebase.py` takes an inventory of a codebase. It counts lines of code by language, separates the owner's own code from code someone else wrote, reads the version-control history, counts contributors and pull requests, lists assets, flags credentials and licences, and produces the standard measures that codebase questionnaires ask for (logical lines and generated lines as `scc` counts them, duplication as `jscpd` measures it, commits on the main branch).
+`size_codebase.py` takes an inventory of a codebase. It counts lines of code by language, separates the owner's own code from code someone else wrote, reads the version-control history, counts contributors, pull requests and reviews, lists assets (and, for a game, its characters, items, props and levels), finds the online services the game uses, its tests and build automation, flags credentials and licences, and produces the standard measures that codebase questionnaires ask for (logical lines and generated lines as `scc` counts them, duplication as `jscpd` measures it, commits on the main branch).
 
 It is a single Python file that needs Python 3.8 or later and nothing else. It runs on Windows, macOS and Linux.
 
@@ -19,7 +19,7 @@ Contents:
 9. [Version control](#9-version-control)
 10. [Contributors](#10-contributors)
 11. [Other findings](#11-other-findings)
-12. [Standard measures (scc, jscpd)](#12-standard-measures-scc-jscpd)
+12. [Standard measures (as scc and jscpd count them)](#12-standard-measures-as-scc-and-jscpd-count-them)
 13. [Output](#13-output)
 14. [Command-line reference](#14-command-line-reference)
 15. [Limitations, and how to correct them](#15-limitations-and-how-to-correct-them)
@@ -30,9 +30,9 @@ Contents:
 
 [SECURITY.md](SECURITY.md) has the full details, each tied to the function that does it: every network connection, every program it runs, every file it writes, everything it reads outside the scanned folder, and the protections against a hostile project. In short:
 
-- **It only reads the project.** It writes its report, a cache holding scc and jscpd, and temporary folders that it deletes when done.
-- **Nothing is uploaded.** It connects to other computers only to download scc and jscpd once (checked against fixed SHA-256 checksums), and to ask your own version-control servers for history and pull-request counts, with the access you already have; the tools are told not to prompt for passwords. `--offline` turns all of that off (see [section 14](#14-command-line-reference)).
-- **The report holds counts**, and the names of folders, languages, libraries, packages and branches. It never holds source code, author names or email addresses (names are read to *count* people and stay in memory), credentials (only their kind and number of files), or database rows. It names a file only if you give that file on its own or mark it with `--third-party`. Error messages in it have paths replaced by `<project>`, `~` or `<path>`. With `--reports`, scc's report and jscpd's totals are saved too; both hold counts only (see [section 12](#12-standard-measures-scc-jscpd)).
+- **It only reads the project.** It writes its report, and temporary folders that it deletes when done. It downloads nothing.
+- **Nothing is uploaded.** It connects to other computers only to ask your own version-control servers for history and pull-request counts, with the access you already have; the tools are told not to prompt for passwords. `--offline` turns all of that off (see [section 14](#14-command-line-reference)).
+- **The report holds counts**, and the names of folders, languages, libraries, packages and branches, and of the online services and tools it recognises (from its own lists). It never holds source code, author names or email addresses (names are read to *count* people and stay in memory), credentials (only their kind and number of files), database rows, the names of classes, levels and other assets, web addresses, or links to documents. It names a file only if you give that file on its own or mark it with `--third-party`. Error messages in it have paths replaced by `<project>`, `~` or `<path>`. With `--reports`, scc's report and jscpd's totals are saved too; both hold counts only (see [section 12](#12-standard-measures-scc-jscpd)).
 
 Look the report over before sending it: folder, library, package and branch names are the owner's own words. SECURITY.md lists exactly what can appear in it.
 
@@ -49,7 +49,7 @@ Microsoft Access is only ever given a temporary *copy* of a database, and only o
 - **A folder.** The usual case. Everything under it is scanned.
 - **Several folders.** Each is scanned and reported separately, with the same options.
 - **Folders or files of old history**, with `--history`, besides the project: see [section 9](#old-history-kept-elsewhere---history).
-- **A single file.** Typically an Access database, which holds a whole program in one file. Only that file is examined (its folder supplies the version-control context). scc and jscpd are not run on a single file.
+- **A single file.** Typically an Access database, which holds a whole program in one file. Only that file is examined (its folder supplies the version-control context).
 - **Nothing.** Started without arguments (for example by double-clicking it on Windows), it asks for a folder: drag it into the window or paste the path, press Enter, and repeat for more folders. An empty line ends it. Options can't be given in this mode.
 
 Dragged and pasted paths are cleaned up: Windows-style `"quotes"`, macOS Terminal's backslash escapes (`My\ Game`), Linux `'quotes'` and `file://` URLs all work.
@@ -155,7 +155,7 @@ Not counted as code: documentation and configuration text (`.txt`, `.md`, `.json
 
 The main table counts **non-blank lines**, comments included. Files saved as UTF-16 (common for Windows C++, C# and UnrealScript, and for scripts saved by SQL Server Management Studio) are converted first, so their blank lines count as blank.
 
-The standard measures (section 12) count **logical lines**: lines that are neither blank nor only a comment. Those come from scc itself; the script doesn't count them.
+The standard measures (section 12) count **logical lines**: lines that are neither blank nor only a comment, as scc counts them.
 
 Some file types have lines removed before counting:
 
@@ -174,7 +174,7 @@ If some of them are code, run again with `--code-ext`:
 --code-ext ".atg=DMS grammar:Ada"
 ```
 
-The part after `=` is the language's name in the report. In the main table every non-blank line of it counts, as for every language. The optional part after `:` is a known language whose comment syntax it shares: `text` (the default), `C`, `C++`, `Ada`, `SQL`, `Lisp`, `Python`, `Pascal`, `Lua` or `Visual Basic`. It is passed on to scc (as `--count-as-pattern`, so scc counts its comments as comments; with `text`, every non-blank line is a logical line) and to jscpd (as `--formats-exts`), so the standard measures include these files too. The option can be repeated. A specification it can't read stops the script with an explanation.
+The part after `=` is the language's name in the report. In the main table every non-blank line of it counts, as for every language. The optional part after `:` is a known language whose comment syntax it shares: `text` (the default), `C`, `C++`, `Ada`, `SQL`, `Lisp`, `Python`, `Pascal`, `Lua` or `Visual Basic`. The standard measures read these files with that language's comments (with `text`, every non-blank line is a logical line), and give their logical lines apart, as scc wouldn't count them. The option can be repeated. A specification it can't read stops the script with an explanation.
 
 ---
 
@@ -422,7 +422,7 @@ Among the owner's code, a file whose contents are byte-for-byte identical to ano
 
 ### Build output
 
-Build output is skipped by the folder rules in section 3. In addition, scc and jscpd leave out files that `.gitignore` files ignore, so those are in the main table but not in the standard measures.
+Build output is skipped by the folder rules in section 3. In addition, the standard measures leave out files that `.gitignore` files ignore, as scc and jscpd do, so those are in the main table but not in the standard measures.
 
 ### Files not committed
 
@@ -467,7 +467,9 @@ Dates: TFVC prints dates in the computer's local format, so only the year is use
 
 ### What each history reports
 
-For each history: the number of changes; for Git, how many are on the branch that is checked out, and how many are merge commits; the number of contributors (see section 10); first and last change; the busiest person's share of the changes; changes per year; pull requests and code reviews found; and notes.
+For each history: the number of changes; for Git, how many are on the branch that is checked out, and how many are merge commits; the number of contributors (see section 10), and for Git how many of them changed code; first and last change; the busiest person's share of the changes; changes per year; changes marked as made with AI coding tools (below); pull requests and code reviews found; and notes.
+
+**Changes made with AI coding tools** are counted where the tools mark them: a co-author line (`Co-authored-by: Claude`, `Copilot`, `Cursor Agent`, `ChatGPT`, `Gemini`, `OpenHands`, `Windsurf`, `Amazon Q`), a sentence they add (`Generated with Claude Code`, aider's `aider:` subject), or the account an agent commits as (`copilot-swe-agent`, `devin-ai-integration[bot]`, `google-labs-jules`, aider's `(aider)` name, `noreply@anthropic.com`). Each change counts once, with the tools named. Many people use these tools without leaving a mark, so this is a lower bound; the standard measures put it beside the number of changes made since 2022.
 
 For Git, it also notes:
 
@@ -501,9 +503,9 @@ When a subfolder of a Git repository is scanned, only the commits that touched t
 
 Pull requests are found three ways, and each is reported separately:
 
-1. **In commit messages.** "Merge pull request #N" (GitHub, Bitbucket Server), "Merged in branch (pull request #N)" (Bitbucket Cloud), "See merge request group/project!N" (GitLab), "Merged PR N:" (Azure DevOps), and GitHub squash merges ending in "(#N)". Each numbering scheme is kept separate, and each number is counted once however many commits mention it. Code reviews are found the same way: Gerrit `Change-Id`s, Phabricator `Differential Revision`s, and Perforce Swarm `#review-N`. These are read from the change messages of every system the script reads messages from: all of them except TFVC (whose history is read without messages) and SourceSafe.
+1. **In commit messages.** "Merge pull request #N" (GitHub, Bitbucket Server), "Merged in branch (pull request #N)" (Bitbucket Cloud), "See merge request group/project!N" (GitLab), "Merged PR N:" (Azure DevOps), and GitHub squash merges ending in "(#N)". Each numbering scheme is kept separate, and each number is counted once however many commits mention it. Code reviews are found the same way: Gerrit `Change-Id`s, Phabricator `Differential Revision`s, Perforce Swarm `#review-N`, and changes whose message names a reviewer in a `Reviewed-by:` or `Approved-by:` line (Gerrit's and Bitbucket Cloud's habit, among others). These are read from the change messages of every system the script reads messages from: all of them except TFVC (whose history is read without messages) and SourceSafe.
 2. **On the Git server.** GitHub, GitLab and Bitbucket Server keep a ref for every pull request ever opened (`refs/pull/N/...`, `refs/merge-requests/N/...`, `refs/pull-requests/N/...`). `git ls-remote` on each remote counts them: open, closed and merged. A remote that can't be reached is reported as "couldn't connect", not as zero pull requests. A remote that is a folder on a network share isn't asked (it keeps no pull requests, and the repository's settings could name any computer). Not with `--offline`.
-3. **Through GitHub's API**, if `gh` is installed and logged in: the number of merged pull requests for each GitHub remote. Not with `--offline`.
+3. **Through GitHub's API**, if `gh` is installed and logged in: the number of merged pull requests for each GitHub remote, and of them, how many were approved in a review (`review:approved`) and how many were merged without any review (`review:none`). Reviews by bots count as reviews; GitHub's search can't tell them apart. Not with `--offline`.
 
 Plastic code reviews are counted with `cm find review`.
 
@@ -611,6 +613,10 @@ People commit under several names and addresses. The script groups identities th
 
 The same grouping is applied **across all histories** (several repositories, nested repositories, SourceSafe and Git): the summary gives the number of people across all of them, each counted once.
 
+### Who changed code
+
+For Git, the contributors who **changed code files** (any of the extensions in section 4) are counted too, with the same grouping, leaving out Epic's commits in an engine fork. The others changed only art, levels, Blueprints, settings and the like: designers and artists, usually. A commit that touches a copied-in library's code counts as changing code.
+
 ### Authors named in code comments
 
 Without version control, the only trace of who wrote the code is often a comment. The script finds authors named in the comments of the owner's code (and in VBA read from Access databases):
@@ -631,6 +637,53 @@ These people are grouped with the same rules as above and **only counted, never 
 Files are counted by kind across the whole folder (including third-party packages): scenes and levels, prefabs, 3D models, textures and images, audio, animations, materials, visual effects, UI layouts, fonts, video, Godot resources, documents (design documents and specifications: PDF, Word, Excel, PowerPoint, OpenDocument, Pages, Keynote, Numbers), Jupyter notebooks, Ren'Py compiled scripts and archives, Unreal packages by type (section 5), and Access databases.
 
 If there are at least 1,000 lines of the owner's code but fewer than 20 content assets (not counting scenes and notebooks) and no visual scripting, the report notes that this looks like the source code only, and suggests asking whether the full project still exists.
+
+Each kind is split between the owner's and **someone else's** (in plugins, Asset Store and Fab packs, Epic's and Unity's samples: the folders section 7 calls someone else's), and someone else's assets are listed by library, pack or plugin, with where each came from where that's known (below).
+
+### Where someone else's code and assets came from
+
+Beside each library, pack or plugin in the third-party tables: "Fab / Unreal Marketplace" (its `.uplugin` has a `MarketplaceURL` or `FabURL`), "Epic's, comes with the engine" (created by Epic), "installed from Fab or Epic's launcher" (marked `Installed`), "Unity Asset Store" (by the downloads on this computer, or by its folders), Epic's and Unity's samples and packages by their folders, "a Git submodule from another owner's repository", or the kind of licence in a licence file in its folder (MIT, GPL, Apache 2.0 ... as for the licence at the top). A plugin the `.uproject` switches off (`"Enabled": false`) is pointed out: it could be left out of what's delivered.
+
+### The studio's own plugins, packages and submodules
+
+Unreal plugins that aren't bought or Epic's, Unity packages embedded in `Packages/` (other than Unity's own), and Git submodules from the owner's own repositories are listed with their lines of code. They are often an in-house framework that other games share, so whether each is part of a sale, licensed, or kept is a question for the owner.
+
+### Gameplay content
+
+What the assets are, as codebase forms ask (characters, items, props, levels). Names of classes, levels and assets are only kept in memory, to tie things together; the report gives counts.
+
+- **Unreal Blueprints** are counted by the class they derive from. A Blueprint package names its class (`BP_Hero_C`) and that class's parent in its header tables (the export's super: an import, read like the rest of the header). The chain is followed through other Blueprints and through the C++ classes in the folder (`UCLASS(...) class AHero : public ACharacter`, the owner's and plugins') up to one of Unreal's own classes: Character, other Pawns, Controllers, game modes and states, HUD and saves, widgets, animation, Gameplay Ability System abilities and effects, behavior-tree tasks, components, data assets, other Actors (props, items, pickups, doors ...), and other objects. A chain that ends at a class that isn't in the folder goes by the end of that class's name ("...Character", "...Component", "...Actor"), or else is counted as derived from a class that isn't here. Blueprints derived from FunctionalTest are counted as automated tests.
+- **C++ classes** (`UCLASS`) in the owner's code are counted the same way, beside the Blueprints, which shows how the game's logic is split between C++ and Blueprints.
+- **Items, weapons and pickups** are found by name: classes whose own name or a base class's name has item, pickup, weapon, loot, collectible, consumable, equipment, armour, ammo or potion in it, among actors, other objects and data assets. This is a heuristic, and the report says so.
+- **Data assets** whose class is one of the game's own data classes (derived from DataAsset), with the items among them by the same names.
+- **Skeletal meshes** (rigged models: characters, creatures, weapons), **skeletons** (about one per distinct body or rig) and **static meshes** (props, scenery).
+- **Unity prefabs** (in Unity's text format) are counted by their components and scripts: characters and creatures (a SkinnedMeshRenderer with an Animator or Animation, a CharacterController or a NavMeshAgent); items, weapons and pickups (one of its scripts, named by its `.cs` file through the guid in its `.meta`, has such a name); and other prefabs. Prefabs saved in Unity's binary format are counted as not looked into. **ScriptableObject** `.asset` files are counted with the items among them by their script's name, and models imported with Unity's **humanoid** rig (`animationType: 3` in their `.meta`) as characters.
+
+### Levels
+
+The owner's levels and scenes (Unreal `.umap`, Unity `.unity` and the other kinds in the Assets list), with:
+
+- **those in the build**, as the project's settings list them: in Unreal, `GameDefaultMap`, `ServerDefaultMap`, `EditorStartupMap` and `TransitionMap` in `Config/DefaultEngine.ini`, and the maps (`+MapsToCook`) and folders (`+DirectoriesToAlwaysCook`) to package in `Config/DefaultGame.ini`; in Unity, the scenes ticked in Build Settings (`ProjectSettings/EditorBuildSettings.asset`). An Unreal project that lists no maps to package packages every level, and the report says so.
+- **those named like test, prototype or work-in-progress levels**: Test, Dev, Debug, Sandbox, Prototype, Playground, Gym, Developers (Unreal's per-developer folder), WIP, Old, Backup, Temp, Example, Demo, Template, Untitled, Greybox, Blockout and the like, as a word in the level's name or folders (split at capitals, so `L_TestMap` counts).
+
+### Online services and multiplayer
+
+For "does the game run without the studio's servers?", which only a test can answer for sure, the report lists what the game connects to, by name for about forty known services (platforms such as Steam, Epic Online Services, Xbox, PlayStation, Google Play and Meta Quest; backends such as PlayFab, Nakama, AccelByte, Unity Gaming Services, Firebase, AWS and Azure; hosted servers such as GameLift, Photon, Hathora and Edgegap; voice chat; crash reporting such as Sentry, BugSplat and Backtrace; analytics; mods; ads and web game portals; and networking libraries such as Mirror, Fish-Net and Netcode for GameObjects), with how each was found:
+
+- plugins the `.uproject` switches on, and plugins in the project's folders;
+- packages the project lists (`package.json`, Unity's `Packages/manifest.json`, NuGet ...), libraries and packs in the folder, and SDKs the code includes or the build files name;
+- settings: the default online platform (`DefaultPlatformService`) and online subsystems switched on (`bEnabled=true`) in `DefaultEngine.ini`, and the cloud services switched on in Unity's `UnityConnectSettings.asset`;
+- web addresses in the owner's code (in quotes) and settings (after `=` or in quotes) whose host is a known service's.
+
+It also counts files of the owner's code that send the game's state to other players (Unreal replication and RPCs, Unity's NetworkBehaviour, RPCs and SyncVars, Photon views, Godot's `@rpc`), files that make web requests (Unreal's HTTP and WebSockets modules, UnityWebRequest, HttpClient, XMLHttpRequest ...), Unreal `Server` targets (a dedicated server is built, so someone has to run it), crash reports sent to a server set in `DefaultEngine.ini`, and the other web hosts in the owner's code and settings: those are **counted, never named**, so the owner can be asked what each is. Hosts of standards, documentation, licences, code hosting, package registries, web fonts, and social and store links don't count.
+
+### How the studio works
+
+- **Automated tests**: test definitions in the owner's code: Unreal automation tests and specs (`IMPLEMENT_SIMPLE_AUTOMATION_TEST`, `BEGIN_DEFINE_SPEC` ...), GoogleTest, Catch2, doctest and Boost.Test, NUnit and the Unity Test Framework (`[Test]`, `[UnityTest]`, `[TestCase]`), xUnit and MSTest, pytest and unittest (`def test...`), Jest, Mocha and Vitest (`it(`, `test(`), GUT and GdUnit4, JUnit, Go, Rust, busted and RSpec; Unity test assemblies (`.asmdef` referencing the test runner); and functional-test Blueprints. This answers "are there automated tests?" even when no coverage report was written.
+- **Build automation (CI)**: the settings files of GitHub Actions, GitLab CI, Jenkins, Azure Pipelines, CircleCI, Bitbucket Pipelines, Travis, AppVeyor, TeamCity, Buildkite, Drone, Gitea and Forgejo Actions, Codemagic, Bitrise, Google Cloud Build, fastlane and Unreal BuildGraph.
+- **Settings for AI coding tools** in the owner's folders: `CLAUDE.md` and `.claude/`, `AGENTS.md`, `.codex/`, `GEMINI.md`, `.cursorrules` and `.cursor/`, Windsurf's, Copilot's instructions, aider's, Cline's, Roo Code's, Continue's, Junie's, Kiro's, Amazon Q's, Augment's, Tabnine's and Codeium's.
+- **Documents**: the owner's Markdown and text documents (`.md`, `.rst`, `.adoc`, `.org`) and their lines, the owner's PDFs and office documents (from the Assets list), and links in the code, documents and settings to documents kept elsewhere: Notion, Confluence, Jira, Google Docs and Drive, Miro, Figma, Trello, SharePoint and OneDrive, Coda, HacknPlan, ClickUp, Milanote, Dropbox Paper, Asana and Monday.com, each link counted once, never shown.
+- **Art and audio tools' own files**: Blender, Maya, 3ds Max, ZBrush, Cinema 4D, Houdini, Substance, Photoshop, Krita, GIMP, Aseprite, Clip Studio, Affinity, Illustrator, Marvelous Designer and Spine files, and FMOD, Wwise, Reaper, Ableton, FL Studio, Pro Tools, Cubase and Audition projects: the sources the game's assets were exported from, which a delivery may or may not include.
 
 ### Credentials
 
@@ -675,48 +728,51 @@ The summary at the top ends with a list of things a reader should check, when pr
 
 ---
 
-## 12. Standard measures (scc, jscpd)
+## 12. Standard measures (as scc and jscpd count them)
 
-Codebase questionnaires commonly ask for the same handful of figures, defined by the tools they name. The report ends with them, measured over the owner's apparently original code:
+Codebase questionnaires commonly ask for the same handful of figures, defined by the tools they name. The report ends with them, measured over the owner's apparently original code. The script counts them itself, the way those tools do: it downloads and runs no other program for them.
 
 | Measure | Definition |
 |---|---|
-| Logical lines of code | scc's count: lines that are not blank and not only a comment |
-| of which generated | scc with `--gen` and `--generated-markers "do not edit,<auto-generated />,<auto-generated>"`, excluding `vendor`, `node_modules`, `dist`, `build`, `generated`, `migrations` |
-| Duplication ratio | jscpd with `--min-tokens 50 --min-lines 5`, ignoring `**/*.csv` |
+| Logical lines of code | as scc 4.1.0 counts them with the forms' `scc -x csv`: lines that are not blank and not only a comment, in every file of a language scc knows (data and documents too: JSON, YAML, XML, Markdown ...), but CSV files |
+| of which generated | as `scc --gen --generated-markers "do not edit,<auto-generated />,<auto-generated>"` finds them, excluding `vendor`, `node_modules`, `dist`, `build`, `generated`, `migrations`: files with one of those markers, in any case, in their first 1,000 bytes |
+| Duplication ratio | as jscpd 5.4.1 measures it with `--min-tokens 50 --min-lines 5`, ignoring `**/*.csv`: the lines in copies of code found elsewhere, over all the lines |
 | Commits on the main branch, without merges or reverts | as `git log --oneline --no-merges` on the main branch, minus subjects containing "revert" |
 | Repositories | the number of histories found (at least 1) |
-| Primary language | the language with the most lines, named as forms name languages (see below) |
+| Primary language | the language with the most logical lines, named as forms name languages (see below) |
 | History | "Git, full history", "Git, but a shallow clone", another system (with the suggestion to convert it to Git or deliver a snapshot), or "flat snapshot" |
-| Changes made before 2022 | changes dated before AI coding assistants were common, out of all changes |
+| Changes made before 2022 | changes dated before AI coding assistants were common, out of all changes, and those since that AI tools marked (section 9) |
 
-### Code scc and jscpd don't recognise
+### Which files
 
-Some languages this script counts are unknown to the pinned scc, which skips their files, and to jscpd: Ren'Py (`.rpy`, `.rpym`), Verse, Ink, Twine, Naninovel, Squirrel, SkookumScript, MoonScript, BlitzMax, Monkey, AppGameKit, PL/I, RPG, VBScript, Delphi project files (`.dpr`), `.tsql`, `.tcc`, and shaders (`.shader`, `.hlsl`, `.cg`, `.cginc`, `.compute`, `.fx`, `.fxh`, `.psh`, `.usf`, `.ush`, `.gdshader`, `.gdshaderinc`, `.glslinc`). When the owner's code has some, both tools are told to read them as a known language whose comments they share, as with `--code-ext`: Ren'Py and Verse as Python, the C-like ones and shaders as C, and so on (the table is `UNRECOGNISED_CODE` in the script). Only extensions the project has are passed, so the tools' commands are otherwise the forms' own. The report says which extensions were added and gives scc's figure without them, which is what the forms' command gives. Visual Basic 6 form and control files (`.frm`, `.ctl` ...) are not added: read whole, their designer sections would count as code.
+The owner's own files, as the rest of the report has them: the folders where the owner's code gives way to someone else's, to the engine, to translations or to build output are left out, and so are someone else's files among the owner's (paths marked `--own` inside such folders are kept). Then, as scc and jscpd leave them out: what `.gitignore` and `.ignore` files ignore (their rules, read from every folder, with `!` negation, `/` anchoring, `**` and folders-only patterns), Git submodules (scc's default), binary files (a NUL byte in the first 10,000), scc's own list of lock files (`package-lock.json`, `Cargo.lock`, `yarn.lock`, `pubspec.lock`, `Podfile.lock`, `pnpm-lock.yaml`), and the ignore files themselves. The report gives the number of folders and files left out as not the owner's (never their names).
 
-The report also gives jscpd's ratio for each kind of file it read (its "formats", such as `python` or `txt`) when there is more than one, because the forms' jscpd command also reads plain-text files, and duplicated text (credits, licences, notes) can dominate the ratio.
+### Logical lines
 
-### Running scc and jscpd
+Each file's language comes from its name, as scc's does: its extension, or for some its whole name (`Makefile`, `Dockerfile`, `CMakeLists.txt`, `LICENSE`, `.bashrc` ...), or for a script without an extension the program its `#!` line names. Where several of scc's languages share an extension, its contents decide (`.h` as C or C++ header or Objective-C, `.m` as Objective-C or MATLAB, `.ts` as TypeScript or a Qt translation, `.v` as Verilog, Coq or V ...).
 
-The script uses pinned versions: **scc 4.1.0** (from its GitHub releases) and **jscpd 5.4.1** (from registry.npmjs.org, where it is published as a self-contained program, so Node.js isn't needed). Builds are pinned for macOS (Apple silicon and Intel), Linux (ARM64 and x64; scc also 32-bit x86; jscpd for glibc and musl) and Windows (ARM64 and x64; scc also 32-bit x86).
+Each line is then code, comment or blank, as scc 4.1.0 decides for that language. The script holds scc's 366 languages (`SCC_LANGUAGES`): their extensions and names, line comments, block comments (and whether they nest), the quotes whose strings keep a comment from starting, whether a string runs on to the next line, and which strings take no backslash escapes. These were taken from scc itself, by running it on files written to show each one, and the rules it follows were found the same way:
 
-- Each is downloaded once, over HTTPS with the server's certificate checked (there is no retry without the check). The download is checked against a fixed SHA-256 checksum, then the one program file is taken out of it and checked against its own checksum. A file that doesn't match is never written or run.
-- They are kept in a cache folder: `%LOCALAPPDATA%\size_codebase_tools` on Windows, `~/Library/Caches/size_codebase_tools` on macOS, and `$XDG_CACHE_HOME/size_codebase_tools` (or `~/.cache/size_codebase_tools`) on Linux, in subfolders named by tool and version. Deleting the folder removes them.
-- The cached program's checksum is checked again before every run. A copy that doesn't match is deleted, and downloaded again if downloading is allowed.
-- No other copy is ever run: an `scc` or `jscpd` installed on the computer is not used.
-- jscpd is given its own configuration file, so a `.jscpd.json` in the project, or a `jscpd` section in its `package.json`, has no effect. Neither tool follows symbolic links.
+- a line with anything outside a comment is code (strings are code); a line with only comments is a comment; a line with only spaces, tabs and carriage returns is blank, but inside a block comment it is a comment, and inside a string that runs on, code. (A form feed isn't a space to scc.)
+- a quote straight after a backslash starts no string;
+- Python's docstrings (`"""` or `'''` at a line's start, or after `r` or `f`) are comments, and anything after one closes makes its line code; elsewhere triple quotes are strings. `r"..."` in Python, `@"..."` in C#, `r"..."` in Rust and Dart and backquotes in Go take no escapes.
 
-Both tools are run over the whole folder. Then only the owner's code is kept: the folders where the owner's code gives way to someone else's, to the engine, or to build output, and someone else's files among the owner's, are left out (from scc's per-file results, and through a jscpd ignore list). Paths marked `--own` inside such folders are kept. The report gives the number of folders and files left out (never their names) and scc's figure for the whole folder for comparison. The tools are not run when a single file is given.
+Checked against scc 4.1.0 on real code, the counts agree exactly on 5.9 million lines of JavaScript and TypeScript (39,447 files), 2.3 million of Erlang, Eigen's C++, Python's C headers, Emacs and 2.5 million lines of Rust (0.04%), and to 0.1% on 10.8 million lines of Python and its libraries, where scc's handling of some strings inside raw strings and regular expressions differs line by line.
 
-### When scc or jscpd can't be used
+**Languages scc doesn't know.** The script counts some code that scc 4.1.0 skips (`MORE_LANGUAGES`): Ren'Py (`.rpy`, `.rpym`), Verse, Ink, Twine, Naninovel, Squirrel, SkookumScript, MoonScript, BlitzMax, Monkey, AppGameKit, PL/I, RPG, VBScript, Delphi project files (`.dpr`), `.tsql`, `.tcc`, shaders (`.shader`, `.hlsl`, `.cg`, `.cginc`, `.compute`, `.fx`, `.fxh`, `.psh`, `.usf`, `.ush`, `.gdshader`, `.gdshaderinc`, `.glslinc`), and Visual Basic 6 form and control files (`.frm`, `.ctl` ...: only the code after their layout), each with its own comments, and the languages named with `--code-ext`, with the comments of the language they're like. They're in the logical lines, and the report gives them apart, with the figure without them, which is what a buyer running scc would get.
 
-If a tool can't be used (there is no pinned build for this computer; it isn't in the cache and `--offline` or `--no-download` was given; the download or a checksum failed; or the tool ran but failed), **its figures are left out**: the script doesn't estimate them. The report says, under "Not included in the standard measures above", which figures are missing and why, and how to include them (for example, run again with an internet connection). In the JSON, `logical_lines`, `generated_lines` or `duplication_ratio` is then `null`, and `not_measured` gives the reason. On macOS, if the download failed because Python couldn't check the server's certificate (python.org's installer has no certificates until its "Install Certificates" step is run), the report says how to fix that.
+### Duplication
+
+As jscpd does: each file of the owner's under 1 MB, with at least 50 tokens and 5 lines, is split into tokens; every run of 50 tokens is looked up among those seen before, in files of the same kind (one language; but every `.h` together, TypeScript's `.d.ts` typings with TypeScript, and HTML, XML and SVG together, as jscpd's "markup") or earlier in the same file. A copy goes on for as long as the runs after it have been seen before too, and counts if it spans 5 lines or more. Each copy adds its lines to the duplicated lines (so lines in two copies that overlap count twice, as in jscpd's report), and the ratio is the duplicated lines over all the lines of those files.
+
+Tokens are as jscpd makes them: each word, each number (with its decimal point), each string (up to its line's end: a docstring's triple quotes are an empty string and a quote) and every other character is one; spaces and line ends are none. Comments differ by language, as in jscpd: in JavaScript and TypeScript they aren't tokens at all; in C, C++, C#, Java, Go, Rust, Swift, Kotlin, PHP, CSS and their like, a `/* block comment */` is split into its words, its other characters and its runs of spaces; elsewhere a comment is one token. The runs of tokens seen so far are kept as their hashes in a compact table (8 bytes a place), so the memory needed grows with the code: about 2 GB for 3 million lines.
+
+Checked against jscpd 5.4.1, the ratio comes within a few hundredths of jscpd's in most code: 0.2530 against 0.2534 on 3.3 million lines of Rust crates, 0.0973 against 0.0984 on Eigen's C++, 0.318 against 0.345 on a TypeScript library, 0.020 against 0.023 on Python. It comes lower where jscpd's tokens differ most from these rules (0.29 against 0.33 on a game with many SVG files; 0.31 against 0.42 on Erlang, whose comments jscpd splits into words), and jscpd 5 also reads the code blocks in Markdown files as code, which the script doesn't.
 
 ### Primary language
 
-- **With scc**: by scc's logical lines in the owner's code, per language. Languages scc counts that aren't code (JSON, XML, YAML, Markdown, plain text, project files and the like) are left out. Code read from databases, which scc can't see, is added as its non-blank lines, and the report says so.
-- **Without scc**: by the non-blank lines in the "Apparently original source code" table, and the report says so. C and C++ are split by file there: `.c` is C, `.h` is a C header, everything else C++.
-- Either way, C headers go to whichever of C and C++ is larger, and names are mapped to the ones forms use (UnityScript as JavaScript, T-SQL and PL/SQL as SQL, Pascal as Object Pascal, scc's "BASH" as Shell, and so on). A language not on the forms' list is shown as "Other", with its own name beside it.
+- By the logical lines in the owner's code, per language. Languages that aren't code (JSON, XML, YAML, Markdown, plain text, project files and the like) are left out. Code read from databases, which isn't in files, is added as its non-blank lines, and the report says so.
+- C headers go to whichever of C and C++ is larger, and names are mapped to the ones forms use (UnityScript as JavaScript, T-SQL and PL/SQL as SQL, Pascal and Delphi as Object Pascal, scc's "BASH" as Shell, and so on). A language not on the forms' list is shown as "Other", with its own name beside it.
 
 ### Commits
 
@@ -726,7 +782,7 @@ For systems that don't record merges, changes whose subject starts with "merge",
 
 ### `--reports`
 
-With `--reports`, two more files are saved beside the script's report, for attaching to a form: scc's JSON report (lines by language, run with the form's command) and a summary of jscpd's report (`{"statistics": ...}`: its totals for each format and in all, as forms ask for it). Both hold counts only. jscpd's full report, which holds copies of the duplicated code and the names of their files, is never saved; it's deleted with jscpd's temporary folder.
+With `--reports`, two more files are saved beside the script's report, for attaching to a form: `_lines.json`, the lines by language (files, lines, code, comments, blank lines and bytes for each, laid out as scc's JSON report is), and `_duplication.json`, the duplication totals for each language and in all (`{"statistics": ...}`, named as in jscpd's report). Both hold counts only: no code and no file names.
 
 ---
 
@@ -747,29 +803,31 @@ They are saved next to the script. If that folder can't be written to, they go i
 
 ### The text report, in order
 
-1. The script's name and version (for example `size_codebase.py 1.2.0`, with a note if `--offline` was given), the project name, then a **summary**: apparently original code (with the top three languages), visual-scripting nodes, the first history in one line (changes, people, date range, pull requests), contributors across all histories, the history of all systems together, where there's more than one (see section 9), test coverage, and the "Check" list.
+1. The script's name and version (for example `size_codebase.py 1.2.0`, with a note if `--offline` was given), the project name, then a **summary**: apparently original code (with the top three languages), visual-scripting nodes, the first history in one line (changes, people, date range and the months it spans, pull requests), contributors across all histories, the history of all systems together, where there's more than one (see section 9), test coverage, automated tests, online services, and the "Check" list.
 2. Project types found; Unreal versions that saved the assets; version control found; total size.
 3. **Apparently original source code** by language, with notes on tests, Epic's and other engines' notices, exact copies, files not committed to Git, and console code.
-4. Original code by folder; folders with their own licence file; text files of unknown kinds.
+4. Original code by folder; folders with their own licence file; the studio's own plugins, packages and submodules; text files of unknown kinds.
 5. Blueprints and other visual scripting; how much of the Unreal assets could be measured.
-6. Databases; files holding data; code the project needs that isn't in the folder; package dependencies.
+6. Databases; files holding data; code the project needs that isn't in the folder; package dependencies; online services and multiplayer.
 7. UnrealScript compiled into `.u` packages.
-8. Someone else's code (with its breakdown by library, package or licence), Unreal Engine's own code, translations, generated code, data.
+8. Someone else's code (with its breakdown by library, package or licence, and where each came from), Unreal Engine's own code, translations, generated code, data.
 9. Precompiled libraries, and notes: built Unity game, packaged Unreal game, Git LFS placeholders, linked folders, paths marked by hand, cooked assets, Ren'Py without source, credentials, no assets.
-10. Assets by kind.
+10. Assets by kind, the owner's and someone else's; someone else's by library, pack or plugin; gameplay content (Unreal classes, Unity prefabs); levels.
 11. Version-control histories, SourceSafe, file dates when there is no history, people named as authors, copyright years, the licence at the top, public repository, submodules, custom engines, nested repositories, the history caveats, and a note if Git first refused a repository that belongs to another user account (section 9).
-12. **Test coverage**, from the reports the tests already wrote (see section 11), or how to write one.
-13. **Standard measures**, with what couldn't be measured and why.
+12. **Test coverage**, from the reports the tests already wrote (see section 11), or how to write one; how the studio works (automated tests, build automation, AI-tool settings, documents, art and audio tools' files).
+13. **Standard measures**, with the logical lines in languages scc doesn't know, the duplication by language, and the changes marked as made with AI coding tools beside those made since 2022.
 14. With `--offline`: that no other computer was contacted, and what was left out because of it.
 15. Problems while scanning, if any. An unexpected error on one file, or in one section of the report, doesn't stop the scan; up to five distinct error messages are listed and the rest of the report is unaffected. Paths in them are replaced: the scanned folder by `<project>`, the home folder by `~`, and anything else that looks like a path, or a quoted file name, by `<path>`.
 
 ### The JSON file
 
-Top-level keys: `script_version`, `offline`, `left_out_offline`, `git_repositories_of_other_users` (how many), `project`, `project_types`, `lines` (files and lines per language for each category: own, test, third-party, engine, generated, translation, data), `own_total`, `duplicate_lines`, `untracked_lines`, `console_lines`, `third_party_by_library`, `folders`, `visual_scripting`, `unreal_coverage`, `unreal_versions`, `assets`, `version_control`, `histories` (rows, reviews and notes of each), `contributors`, `dependencies_not_here`, `precompiled_libraries`, `credentials` (kinds and file counts), `copyright_years`, `licence`, `public_repositories`, `submodules`, `alerts`, `problems`, `test_coverage` (`reports`: each report's folder, format, date, number of files, and `covered` and `total` for each of `lines`, `statements`, `branches` and `functions`, or `percent`; `unread`: raw data and reports that couldn't be read, by folder and kind, with the command that makes a report), `standard_measures` (the figures, `null` where a tool couldn't be used, with `not_measured` saying why; the tools' versions; and the primary language and what it was judged from), `unknown_text_files`, `code_extensions_named` and `databases`. Like the text report, it holds no author names, no code and no credential text.
+Top-level keys: `script_version`, `offline`, `left_out_offline`, `git_repositories_of_other_users` (how many), `project`, `project_types`, `lines` (files and lines per language for each category: own, test, third-party, engine, generated, translation, data), `own_total`, `duplicate_lines`, `untracked_lines`, `console_lines`, `third_party_by_library`, `folders`, `visual_scripting`, `unreal_coverage`, `unreal_versions`, `assets`, `assets_someone_elses`, `assets_by_library`, `third_party_terms`, `own_frameworks`, `game_content` (`unreal`, `unity`, `levels`), `online`, `practices`, `version_control`, `histories` (rows, reviews and notes of each), `contributors`, `dependencies_not_here`, `precompiled_libraries`, `credentials` (kinds and file counts), `copyright_years`, `licence`, `public_repositories`, `submodules`, `alerts`, `problems`, `test_coverage` (`reports`: each report's folder, format, date, number of files, and `covered` and `total` for each of `lines`, `statements`, `branches` and `functions`, or `percent`; `unread`: raw data and reports that couldn't be read, by folder and kind, with the command that makes a report), `standard_measures` (the figures: `logical_lines`, `generated_lines`, `duplication_ratio`, with the logical lines by language, the duplication by language, the logical lines in languages scc doesn't know, and `measured_as`; and the primary language and what it was judged from), `unknown_text_files`, `code_extensions_named` and `databases`. Like the text report, it holds no author names, no code and no credential text.
 
 ---
 
 ## 14. Command-line reference
+
+[MANUAL.md](MANUAL.md) explains each option in full, with examples, and what the script saves, connects to and exits with. In short:
 
 ```
 python3 size_codebase.py [PATH ...] [options]
@@ -782,16 +840,15 @@ On Windows, `py` works in place of `python3`, and so does double-clicking the sc
 | `PATH` | A folder to scan, or a single file (such as an Access database). Several can be given; each is scanned and reported separately. With none, the script asks for folders interactively. |
 | `--third-party PATH` | Count this folder or file as someone else's code. Relative to the scanned folder, or absolute. Repeatable. Overrides every automatic rule. |
 | `--own PATH` | Count this folder or file as the owner's own code, even inside a folder that would otherwise be third-party. Repeatable. |
-| `--code-ext .EXT=NAME[:LIKE]` | Count files with this extension as code in language NAME. LIKE is a known language whose comments it shares, for scc and jscpd: `text` (default), `C`, `C++`, `Ada`, `SQL`, `Lisp`, `Python`, `Pascal`, `Lua` or `Visual Basic`. Repeatable. |
+| `--code-ext .EXT=NAME[:LIKE]` | Count files with this extension as code in language NAME. LIKE is a known language whose comments it shares, for the standard measures: `text` (default), `C`, `C++`, `Ada`, `SQL`, `Lisp`, `Python`, `Pascal`, `Lua` or `Visual Basic`. Repeatable. |
 | `--sql-server SERVER` | Read the code (procedures, functions, views, triggers) from this running SQL Server through `sqlcmd`. Windows sign-in, or `SQLCMDUSER`/`SQLCMDPASSWORD`. Repeatable. Can't be combined with `--offline`. |
 | `--sql-database NAME` | With `--sql-server`: read only this database instead of every user database. Repeatable; applies to every server named. |
 | `--trust-server-certificate` | With `--sql-server`: trust the server's certificate without checking it (`sqlcmd -C`), for a server you trust that has its own self-signed certificate. |
 | `--sourcesafe PATH` | A Visual SourceSafe database (the folder with `srcsafe.ini`, a copy without it, or its `data` folder) holding this code's history. May be on a network share, except with `--offline`. Repeatable. |
 | `--history PATH` | A folder or file holding older history of this code kept somewhere else: working copies and repositories of any system, bare Git clones, Git bundles, SVN repositories' own folders, SVN dumps, SourceSafe databases (see [Old history kept elsewhere](#old-history-kept-elsewhere---history)). Only what is inside it is read. Must exist; may be on a network share, except with `--offline`. Repeatable. |
 | `--network-sourcesafe` | Also open SourceSafe databases on network shares that the project files name, and a `Data_Path` on a network share in a database's `srcsafe.ini`. Without it they're named on screen but not opened. Can't be combined with `--offline`. |
-| `--offline` | Connect to no other computer: no downloads (a copy of scc or jscpd downloaded before is still used, after its checksum is checked), no version-control servers, no network shares besides the folder scanned, and Access databases aren't opened in Microsoft Access. The report lists what that left out. |
-| `--no-download` | Don't download scc or jscpd. A copy already in the cache is still used; otherwise their figures are left out. |
-| `--reports` | Also save scc's JSON report and jscpd's totals beside the report, for attaching to a form. Both hold counts only. |
+| `--offline` | Connect to no other computer: no version-control servers, no network shares besides the folder scanned, and Access databases aren't opened in Microsoft Access. The report lists what that left out. |
+| `--reports` | Also save the lines by language and the duplication totals beside the report, laid out as scc's report and jscpd's totals are, for attaching to a form. Both hold counts only. |
 | `-h`, `--help` | Print the script's version and how to use it, and stop. |
 
 Environment variables: `SSDIR` names a SourceSafe database; `SQLCMDUSER` and `SQLCMDPASSWORD` are a SQL Server sign-in, used by `sqlcmd`; `ASSETSTORE_CACHE_PATH` is a moved Unity Asset Store cache; `P4CONFIG` is the name of Perforce's settings file. [SECURITY.md](SECURITY.md) lists every variable and setting the script and the tools it runs read.
@@ -817,7 +874,7 @@ Notes on parsing: the script stops with a message, before scanning anything, at 
 
 **The main table counts non-blank lines, comments included.** The standard measures count logical lines, as scc does. Both are shown; they are not expected to match. Files that `.gitignore` ignores are in the main table but not in the standard measures.
 
-**The standard measures need scc and jscpd.** Where one can't be used (offline before it was ever downloaded, say), its figures are missing from the report, not estimated, and the report says why. Without scc, the primary language is judged from the main table.
+**The standard measures are counted as scc and jscpd count them, not by them.** The logical lines agree with scc 4.1.0's almost everywhere; the duplication ratio comes close to jscpd 5.4.1's, but its tokens differ in some languages, so it can be a few hundredths lower or higher (section 12). A buyer running the tools themselves can get slightly different figures, and won't count the languages scc doesn't know.
 
 **`--offline` leaves things out**: pull requests on the Git server, histories kept on a server, network shares named in your settings, and the VBA in Access databases (and their forms, reports and queries too, unless mdbtools is installed). The report lists what was left out.
 
@@ -832,6 +889,8 @@ Notes on parsing: the script stops with a message, before scanning anything, at 
 **SourceSafe**: only the first five databases found are read, and `.ssa` archives must be restored with SourceSafe's own tools first.
 
 **Histories in more than one system**: a change is found in two histories by a conversion marker or its message (section 9). A conversion that rewrote the messages and kept no marker, of a history whose messages are too few to go by, is fitted together by dates alone, which can count work done in both systems at once (side by side, for different work) only once.
+
+**Gameplay content, online services and tests are found by signs, not proven.** Kinds of class come from what they derive from, items from names, and levels in the build from the project's settings; a game that defines its characters in data tables, or loads levels by name from code, is undercounted. Online services are found by the names this script knows and by web addresses in quotes; one reached through an address built at run time, or an SDK it doesn't know, is missed, and whether the game runs without the studio's servers takes running it. Test definitions are found by the usual ways of writing them; a home-grown test harness isn't recognised.
 
 **Duplicate files are exact copies only.** Files that differ by a single byte are not duplicates; near-copies show up in jscpd's duplication ratio instead.
 

@@ -20,9 +20,9 @@ If it gets a folder wrong, say so (paths relative to the project folder, or abso
     python3 size_codebase.py "/path/to/project" --third-party Source/Game/SomeLib --own Plugins/MyPlugin
 
 Code in a language it doesn't know (one of the studio's own, say) is listed as text files of unknown
-kinds. Name each extension; it's then counted as code (every non-blank line), and scc and jscpd
-(below) read it as text, or as a known language whose comments it shares (C, C++, Ada, SQL, Lisp,
-Python, Pascal, Lua or Visual Basic); repeatable:
+kinds. Name each extension; it's then counted as code (every non-blank line), and the standard
+measures (below) read it as text, or as a known language whose comments it shares (C, C++, Ada,
+SQL, Lisp, Python, Pascal, Lua or Visual Basic); repeatable:
     python3 size_codebase.py "/path/to/project" --code-ext .par=PARLANSE --code-ext ".atg=DMS grammar:Ada"
 
 Visual SourceSafe: its history is read straight from the SourceSafe database (the folder with
@@ -65,25 +65,21 @@ table, so no customer data. Nothing about the project is uploaded anywhere: serv
 asked the questions below.
 
 The report ends with the standard measures buyers' codebase forms ask for: logical lines of code
-and generated lines (scc), duplication (jscpd), commits on the main branch without merges or
-reverts, and the primary language. scc and jscpd are downloaded for this, once, from their
-official releases (github.com, registry.npmjs.org), over HTTPS with the certificate checked, and
-checked against fixed checksums, as is the program each time before it runs; nothing needs
-installing, and they're kept in a cache folder (on Windows %LOCALAPPDATA%\\size_codebase_tools).
-No other copy of them is ever run. If one can't be downloaded, its figures are left out of the
-report, which says why. To also save scc's report and a summary of jscpd's beside this one, for
-attaching to a form:
+and generated lines (as scc counts them), duplication (as jscpd measures it), commits on the main
+branch without merges or reverts, and the primary language. The script counts these itself, the
+way scc and jscpd do, in about 400 languages: it downloads and runs no other program for them. To
+also save the lines by language and the duplication totals beside this one, for attaching to a
+form, laid out as scc's report and jscpd's totals are:
     python3 size_codebase.py "/path/to/project" --reports
-(Both hold counts only. jscpd's full report, which holds copies of the duplicated code, is never
-saved: only its totals are, as forms ask.)
+(Both hold counts only: no code and no file names.)
 
 Test coverage is read from the reports the project's tests already wrote (lcov.info, coverage.xml,
 jacoco.xml, coverage-final.json, a Go cover profile, an OpenCover or ReportGenerator summary from
 Unity's Code Coverage package ...), wherever they are in the project, build output included. The
 tests themselves are never run. To include coverage, run them with it turned on first.
 
-Connecting to other computers. Besides downloading scc and jscpd, it asks servers only for what the
-history needs, read-only, with the access you already have (it never stops to ask for a password):
+Connecting to other computers. It downloads nothing, and asks servers only for what the history
+needs, read-only, with the access you already have (it never stops to ask for a password):
   - Git: each remote, for the pull requests it keeps (git ls-remote); GitHub, through its gh
     command if that's installed and signed in, for the merged pull requests; and GitHub, GitLab or
     Bitbucket, without signing in, whether anyone can read the repository.
@@ -92,13 +88,10 @@ history needs, read-only, with the access you already have (it never stops to as
   - --sql-server: that SQL Server. --sourcesafe or SSDIR: the folder named, even on a network share.
   - --network-sourcesafe: SourceSafe databases on network shares that the project files name.
 Options:
-  --offline        Connect to no other computer at all: no downloads (a copy of scc or jscpd
-                   downloaded before still runs, after its checksum is checked), no version-control
-                   servers, no network shares besides the folder you name, and no Access database
-                   opened in Microsoft Access. The report says what that left out. Can't be used
-                   with --sql-server.
-  --no-download    Don't download scc or jscpd (copies downloaded before are still used).
-  --reports        Save scc's report and jscpd's totals beside this one (see above).
+  --offline        Connect to no other computer at all: no version-control servers, no network
+                   shares besides the folder you name, and no Access database opened in Microsoft
+                   Access. The report says what that left out. Can't be used with --sql-server.
+  --reports        Save the lines by language and the duplication totals beside this one (see above).
   --trust-server-certificate
                    With --sql-server: trust the server's certificate without checking it (sqlcmd -C).
   --network-sourcesafe
@@ -118,11 +111,12 @@ import shutil
 import struct
 import subprocess
 import sys
-from collections import Counter, defaultdict, namedtuple
+from array import array
+from collections import Counter, defaultdict, deque, namedtuple
 from datetime import datetime, timezone
 from stat import S_ISREG
 
-__version__ = "1.5.0"
+__version__ = "1.7.0"
 
 
 # #######################################
@@ -135,6 +129,14 @@ __version__ = "1.5.0"
 
 def fmt(value):
     return f"{value:,}" if isinstance(value, int) else str(value)
+
+
+def months_between(first, last):
+    """" (32 months)" between two dates ("YYYY-MM-DD"), or "" if either isn't one."""
+    if not (re.match(r"\d{4}-\d\d", first or "") and re.match(r"\d{4}-\d\d", last or "")):
+        return ""
+    n = (int(last[:4]) - int(first[:4])) * 12 + int(last[5:7]) - int(first[5:7])
+    return f" ({plural(max(n, 0), 'month')})"
 
 
 def plural(n, word):
@@ -260,17 +262,6 @@ def is_network_path(path):
     return False
 
 
-def file_sha256(path):
-    """A file's SHA-256 checksum, or None if it can't be read."""
-    import hashlib
-    digest = hashlib.sha256()
-    try:
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                digest.update(chunk)
-    except OSError:
-        return None
-    return digest.hexdigest()
 
 
 def is_link(path):
@@ -335,9 +326,10 @@ def is_lfs_pointer(path):
 # ##############################
 # Temporary folders
 # ##############################
-# The temporary folders this script makes, by what they're for: jscpd's report (it holds copies of
-# the duplicated code), copies of Access databases, with the PowerShell script that reads them, and
-# the repository a Git bundle named with --history is read into.
+# The temporary folders this script makes, by what they're for: copies of Access databases, with
+# the PowerShell script that reads them, and the repository a Git bundle named with --history is
+# read into; and jscpd's report (it held copies of the duplicated code), which versions before 1.7
+# made, so that one they left behind is deleted too.
 # Each is deleted as soon as it's done with; one left behind by a run that was stopped (Ctrl-C) is
 # deleted by a later run, once it's a day old (younger ones may belong to a run still going).
 TEMP_PREFIXES = {"jscpd": "size_codebase_jscpd_", "access": "size_codebase_access_", "bundle": "size_codebase_bundle_"}
@@ -427,7 +419,7 @@ def windows_program(name, path):
     which on Windows looks in the current folder first (so a project's own git.exe would run if this
     were started from inside it), and also finds .bat and .cmd files, which Windows runs through
     cmd.exe, which can read their arguments as more commands."""
-    if os.path.dirname(name):   # a full path already (scc's and jscpd's, say)
+    if os.path.dirname(name):   # a full path already
         return name if os.path.isfile(name) else None
     for folder in path.split(os.pathsep):
         folder = folder.strip().strip('"')
@@ -1005,6 +997,38 @@ def is_bought_unreal_plugin(uplugin_path):
                 or str(p.get("CreatedBy", "")).startswith("Epic Games"))
 
 
+def unreal_plugin_terms(uplugin_path):
+    """Where a plugin someone else wrote came from, for the third-party table."""
+    p = read_json(uplugin_path)
+    p = p if isinstance(p, dict) else {}
+    if p.get("MarketplaceURL") or p.get("FabURL"):
+        return "Fab / Unreal Marketplace"
+    if str(p.get("CreatedBy", "")).startswith("Epic Games"):
+        return "Epic's, comes with the engine"
+    return "installed from Fab or Epic's launcher"
+
+
+# Where the folders someone else's code and assets are recognised by come from.
+FOLDER_TERMS = {
+    "startercontent": "Epic's sample content", "animstarterpack": "Epic's sample content",
+    "mannequin": "Epic's sample content", "levelprototyping": "Epic's sample content",
+    "megascans": "Fab / Quixel Megascans", "marketplace": "Fab / Unreal Marketplace", "fab": "Fab / Unreal Marketplace",
+    "textmesh pro": "Unity's own", "samples": "Unity's samples", "standard assets": "Unity's Standard Assets",
+    "sample assets": "Unity's samples", "assetstoretools": "Unity's own", "com.unity.": "Unity's own package",
+    "renpy": "Ren'Py (MIT)", "lib": "Ren'Py's copy of Python",
+}
+
+
+def folder_licence(dirpath, filenames):
+    """The kind of licence in a licence file in this folder (see licence_kind), or None."""
+    for name in sorted(filenames):
+        if LICENSE_FILE.match(name):
+            data = read_settings_file(os.path.join(dirpath, name), 30000)
+            if data:
+                return licence_kind(data.decode("utf-8", "replace"))
+    return None
+
+
 # ####################
 # Libraries copied in
 # ####################
@@ -1205,27 +1229,12 @@ def meta_guid(path):
 # ##############################
 # Languages this script doesn't know, named with --code-ext (".par=PARLANSE", ".atg=DMS grammar:Ada"):
 # extension -> (name, the known language whose comments it shares). This script counts every
-# non-blank line of them, as of every language; scc and jscpd are told to read them as that known
-# language (scc's name for it, jscpd's), "text" (the default) as plain text.
+# non-blank line of them, as of every language; the standard measures read them with that known
+# language's comments (by scc's name for it), "text" (the default) as plain text.
 EXTRA_CODE = {}
 LIKE_LANGUAGES = {"text": ("Plain Text", "txt"), "C": ("C", "c"), "C++": ("C++", "cpp"), "Ada": ("Ada", "ada"),
                   "SQL": ("SQL", "sql"), "Lisp": ("Lisp", "lisp"), "Python": ("Python", "python"),
                   "Pascal": ("Pascal", "pascal"), "Lua": ("Lua", "lua"), "Visual Basic": ("Visual Basic", "visual-basic")}
-
-# Code this script counts that the pinned scc doesn't recognise (it skips the files) and jscpd
-# doesn't read: extension -> the known language whose comments it shares (LIKE_LANGUAGES). When
-# the studio's own code has some, scc and jscpd are told to read them as that language, as with
-# --code-ext, so the standard measures include them, and the report says so. Not Visual Basic 6's
-# form and control files (.frm, .ctl ...): read whole, their designer section would count as code.
-UNRECOGNISED_CODE = {
-    ".rpy": "Python", ".rpym": "Python", ".verse": "Python",                     # Ren'Py, Verse: # comments
-    ".ink": "C", ".sk": "C", ".nut": "C", ".agc": "C", ".pl1": "C", ".pli": "C",   # // or /* */ comments
-    ".cg": "C", ".cginc": "C", ".compute": "C", ".fx": "C", ".fxh": "C", ".gdshader": "C", ".gdshaderinc": "C",
-    ".glslinc": "C", ".hlsl": "C", ".psh": "C", ".shader": "C", ".usf": "C", ".ush": "C",   # shaders
-    ".tcc": "C++", ".moon": "Lua", ".dpr": "Pascal", ".tsql": "SQL", ".nani": "Lisp",       # Naninovel: ; comments
-    ".bmx": "Visual Basic", ".monkey": "Visual Basic", ".monkey2": "Visual Basic", ".vbs": "Visual Basic",   # ' comments
-    ".rpgle": "text", ".sqlrpgle": "text", ".tw": "text", ".twee": "text"}
-
 
 def add_code_extension(spec):
     """--code-ext: count files with this extension as code in a language of their own. Raises
@@ -1334,6 +1343,79 @@ def secrets_in(data):
     return {kind for kind, pattern in SECRETS if pattern.search(data)}
 
 
+# ####################
+# Tests, classes, and what the code connects to
+# ####################
+JS_EXTS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
+# How each kind of automated test is defined: (kind, pattern, the extensions it's looked for in).
+TEST_DEFINITIONS = [
+    ("Unreal automation tests and specs", re.compile(
+        rb"^[ \t]*(?:IMPLEMENT_(?:SIMPLE|COMPLEX|CUSTOM_SIMPLE|CUSTOM_COMPLEX|NETWORKED)_AUTOMATION_TEST(?:_PRIVATE)?"
+        rb"|BEGIN_DEFINE_SPEC|DEFINE_SPEC)[ \t]*\(", re.M), {".cpp", ".h", ".inl"}),
+    ("C++ tests (GoogleTest, Catch2, doctest, Boost.Test)", re.compile(
+        rb"^[ \t]*(?:TEST|TEST_F|TEST_P|TYPED_TEST|TEST_CASE|SCENARIO|BOOST_AUTO_TEST_CASE|BOOST_FIXTURE_TEST_CASE)[ \t]*\(",
+        re.M), {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp"}),
+    (".NET tests (NUnit, Unity Test Framework, xUnit, MSTest)", re.compile(
+        rb"^[ \t]*\[(?:Test|UnityTest|TestCase|TestCaseSource|Fact|Theory|TestMethod|DataTestMethod)\b", re.M), {".cs"}),
+    ("Python tests (pytest, unittest)", re.compile(rb"^[ \t]*(?:async[ \t]+)?def[ \t]+test\w*[ \t]*\(", re.M), {".py"}),
+    ("JavaScript/TypeScript tests (Jest, Mocha, Vitest ...)", re.compile(
+        rb"^[ \t]*(?:it|test)(?:\.(?:each|only|skip|concurrent)\b[^(\n]*)?[ \t]*\([ \t]*[\"'`]", re.M), JS_EXTS),
+    ("GDScript tests (GUT, GdUnit4)", re.compile(rb"^func[ \t]+test_\w*[ \t]*\(", re.M), {".gd"}),
+    ("Java/Kotlin tests (JUnit)", re.compile(rb"^[ \t]*@(?:Test|ParameterizedTest)\b", re.M), {".java", ".kt"}),
+    ("Go tests", re.compile(rb"^func[ \t]+Test\w*[ \t]*\([ \t]*\w+[ \t]+\*testing\.T\)", re.M), {".go"}),
+    ("Rust tests", re.compile(rb"^[ \t]*#\[(?:test|tokio::test)\]", re.M), {".rs"}),
+    ("Lua tests (busted)", re.compile(rb"^[ \t]*it[ \t]*\([ \t]*[\"']", re.M), {".lua"}),
+    ("Ruby tests (RSpec, Minitest)", re.compile(rb"^[ \t]*(?:it[ \t]+[\"']|def[ \t]+test_)", re.M), {".rb"}),
+]
+# An Unreal C++ class and the class it derives from: "UCLASS(...) class MYGAME_API AHero : public ACharacter".
+UCLASS_DEFINITION = re.compile(rb"\bUCLASS[ \t]*\((?:[^()]|\([^()]*\))*\)\s*class\s+(?:\w+_API\s+)?(\w+)\s*(?:final\s*)?"
+                               rb":\s*public\s+(\w+)")
+# Code that talks to web servers, and code that sends the game's state to other players.
+WEB_REQUEST = re.compile(rb"\b(?:FHttpModule|IHttpRequest|FWebSocketsModule|UnityWebRequest|HttpClient|HttpWebRequest"
+                         rb"|ClientWebSocket|WebSocket|HTTPRequest|XMLHttpRequest|axios|urllib\.request"
+                         rb"|requests\.(?:get|post|put))\b")
+WEB_REQUEST_WORDS = (b"Http", b"HTTP", b"WebSocket", b"WebRequest", b"axios", b"urllib", b"requests.")
+REPLICATION = re.compile(rb"\b(?:GetLifetimeReplicatedProps|DOREPLIFETIME\w*|ReplicatedUsing|NetMulticast|NetworkBehaviour"
+                         rb"|ServerRpc|ClientRpc|SyncVar|PunRPC|PhotonView|NetworkObject|rpc_id)\b|@rpc\b")
+REPLICATION_WORDS = (b"Replicat", b"DOREPLIFETIME", b"NetMulticast", b"NetworkBehaviour", b"Rpc", b"RPC", b"SyncVar",
+                     b"PhotonView", b"NetworkObject", b"rpc")
+# A web address as a value (in quotes, or after "="), not in a comment's prose: its host.
+URL_IN_VALUE = re.compile(rb"(?:[\"'`]|=[ \t]*)[ \t]*(?:https?|wss?)://(?:[^\s/@\"'`]{1,200}@)?([A-Za-z0-9][A-Za-z0-9.-]{0,252})")
+# Links to documents kept elsewhere: (service, its hosts and paths).
+DOCUMENT_SERVICES = [
+    ("Notion", r"(^|\.)notion\.(so|site)$"), ("Confluence", r"\.atlassian\.net/wiki|(^|\.)confluence\."),
+    ("Jira", r"\.atlassian\.net/(browse|jira|secure)|(^|\.)jira\."), ("Google Docs and Drive", r"^(docs|drive)\.google\.com$"),
+    ("Miro", r"(^|\.)miro\.com$"), ("Figma", r"(^|\.)figma\.com$"), ("Trello", r"(^|\.)trello\.com$"),
+    ("SharePoint / OneDrive", r"\.sharepoint\.com$|^1drv\.ms$|^onedrive\.live\.com$"), ("Coda", r"(^|\.)coda\.io$"),
+    ("HacknPlan", r"(^|\.)hacknplan\.com$"), ("ClickUp", r"(^|\.)clickup\.com$"), ("Milanote", r"(^|\.)milanote\.com$"),
+    ("Dropbox Paper", r"^paper\.dropbox\.com$"), ("Asana", r"(^|\.)asana\.com$"), ("Monday.com", r"(^|\.)monday\.com$"),
+]
+DOCUMENT_SERVICES = [(name, re.compile(pattern, re.I)) for name, pattern in DOCUMENT_SERVICES]
+ANY_URL = re.compile(rb"https?://([A-Za-z0-9][A-Za-z0-9.-]{0,252})(/[^\s\"'<>()\[\]]{0,300})?")
+
+
+def document_links(data):
+    """{(service, link)} for links to documents kept elsewhere (Notion, Confluence, Google Docs ...).
+    The links are kept in memory only, to count each once; reports give only the number per service."""
+    found = set()
+    if b"://" not in data:
+        return found
+    for host, rest in ANY_URL.findall(data):
+        host, rest = host.decode("ascii", "replace").lower().rstrip("."), rest.decode("utf-8", "replace")
+        for name, pattern in DOCUMENT_SERVICES:
+            if pattern.search(host) or pattern.search(host + rest):
+                found.add((name, host + rest))
+                break
+    return found
+
+
+def hosts_in(data):
+    """The hosts of the web addresses given as values (in quotes, or after "=") in this text."""
+    if b"://" not in data:
+        return set()
+    return {h.decode("ascii").lower().rstrip(".") for h in URL_IN_VALUE.findall(data)}
+
+
 # ##############################
 # Reading one file
 # ##############################
@@ -1342,10 +1424,15 @@ def read_code_file(path, ext):
     """What's in one source file, as a dict: lines (non-blank), generated, licence (the library or
     licence its header names, or EPIC_NOTICE, or None), data (mostly an embedded data array, not
     code), includes (#include paths, C-family only), years (in copyright notices), authors (people
-    named as authors in comments, see authors_in), secrets (kinds of credentials found) and digest
-    (to spot the same file in several places)."""
+    named as authors in comments, see authors_in), secrets (kinds of credentials found), digest
+    (to spot the same file in several places), tests (Counter of the automated tests it defines, by
+    kind), uclasses ([(Unreal C++ class, the class it derives from)]), web (whether it makes web
+    requests), replication (whether it sends the game's state to other players), hosts (of the web
+    addresses it holds as values) and documents (links to documents kept elsewhere, see
+    document_links)."""
     facts = {"lines": 0, "generated": False, "licence": None, "data": False, "includes": [], "years": [],
-             "authors": [], "secrets": set(), "digest": None}
+             "authors": [], "secrets": set(), "digest": None, "tests": Counter(), "uclasses": [], "web": False,
+             "replication": False, "hosts": set(), "documents": set()}
     try:
         with open(path, "rb") as f:
             data = f.read()
@@ -1387,6 +1474,20 @@ def read_code_file(path, ext):
         facts["years"] += [int(start)] + ([int(end)] if end else [])
     facts["authors"] = authors_in(b"\n".join(lines))
     facts["secrets"] = secrets_in(data)
+    for kind, pattern, exts in TEST_DEFINITIONS:
+        if ext in exts:
+            n = len(pattern.findall(data))
+            if n:
+                facts["tests"][kind] += n
+    if ext in C_FAMILY_EXTS and b"UCLASS" in data:
+        facts["uclasses"] = [(a.decode("ascii", "replace"), b.decode("ascii", "replace"))
+                             for a, b in UCLASS_DEFINITION.findall(data)]
+    # (a quick look for the words first: searching a whole file for any of many patterns is slow)
+    facts["web"] = any(w in data for w in WEB_REQUEST_WORDS) and bool(WEB_REQUEST.search(data))
+    facts["replication"] = any(w in data for w in REPLICATION_WORDS) and bool(REPLICATION.search(data))
+    facts["hosts"] = hosts_in(data)
+    facts["documents"] = document_links(data)
+    facts["bytes"] = data   # for the standard measures, so the file isn't read twice
     return facts
 
 
@@ -1514,9 +1615,12 @@ def read_unreal_package(path):
         status       "read" (its tables were read, nodes and all), "header" (only its version: a
                      kind of package without graphs), "cooked", or "unreadable"
         looks_like_blueprint   for an unreadable one: does it seem to hold graphs we couldn't count?
+        generated, parent      a Blueprint's class ("BP_Hero_C") and the class it derives from
+                               ("Character", or another Blueprint's "BP_Enemy_C") (UE4/5), else None
     """
     info = {"engine": "?", "version": None, "cooked": False, "main_class": None, "nodes": Counter(),
-            "classes": 0, "script_lines": 0, "status": "unreadable", "looks_like_blueprint": False}
+            "classes": 0, "script_lines": 0, "status": "unreadable", "looks_like_blueprint": False,
+            "generated": None, "parent": None}
     stem, ext = os.path.splitext(os.path.basename(path))
     try:
         with open(path, "rb") as f:
@@ -1718,6 +1822,13 @@ def read_ue4_package(head, read_upto, endian, stem, info, file_size):
         name = names[name_index] + (f"_{number - 1}" if number else "")
         if outer == 0 and name.lower() == stem.lower():
             info["main_class"] = cls
+        # A Blueprint's class (its BlueprintGeneratedClass, "BP_Hero_C") names the class it derives
+        # from as its super: an import (a C++ class, or another Blueprint's class).
+        if outer == 0 and cls and cls.endswith("BlueprintGeneratedClass") and info["generated"] is None:
+            info["generated"] = name
+            super_index = unpack(data, pos + 4)[0]
+            if super_index < 0 and -super_index <= import_count:
+                info["parent"] = imports[-super_index - 1]
     info["nodes"] = nodes
     info["status"] = "read"
 
@@ -2017,6 +2128,25 @@ PR_IN_MESSAGE = [
     ("PR", re.compile(r"^Merged PR (\d+):", re.M)),                       # Azure DevOps
 ]
 PR_IN_SUBJECT = re.compile(r"\(#(\d+)\)\s*$")   # GitHub squash merges: "Fix the crash (#123)"
+# Changes whose message names the person who reviewed or approved them (Gerrit, Bitbucket Cloud,
+# the Linux kernel's habit): each change counted once.
+REVIEWER_IN_MESSAGE = re.compile(r"^(?:Reviewed-by|Approved-by):", re.M | re.I)
+# Changes made with AI coding tools, as the tools mark them: a co-author line or a sentence they add
+# to the message, or the account an agent commits as. Matched against "name <email>" and the message.
+AI_CUES = ("co-authored-by", "generated with", "aider", "anthropic", "copilot", "cursor", "codex", "devin", "jules",
+           "gemini", "openhands", "amazon-q", "[bot]")   # one of these is in every message AI_MARKERS match
+AI_MARKERS = [(tool, re.compile(pattern, re.I | re.M)) for tool, pattern in [
+    ("Claude Code", r"^co-authored-by:\s*claude\b|generated with \[?claude code|noreply@anthropic\.com|^claude\[bot\]"),
+    ("GitHub Copilot", r"^co-authored-by:\s*copilot\b|copilot-swe-agent|\+copilot@users\.noreply\.github\.com"),
+    ("Cursor", r"^co-authored-by:\s*cursor|cursoragent@cursor\.com|^cursor\[bot\]"),
+    ("Aider", r"^aider: |\(aider\) <"),
+    ("OpenAI Codex", r"^co-authored-by:\s*(chatgpt|codex|openai)\b|chatgpt-codex-connector|^codex\[bot\]"),
+    ("Devin", r"devin-ai-integration|devin@cognition"),
+    ("Gemini / Jules", r"^co-authored-by:\s*(gemini|jules)\b|google-labs-jules|gemini-code-assist"),
+    ("OpenHands", r"^co-authored-by:\s*openhands|openhands-agent|openhands@all-hands\.dev"),
+    ("Windsurf", r"^co-authored-by:\s*(windsurf|codeium|cascade)\b"),
+    ("Amazon Q", r"^co-authored-by:\s*amazon q\b|amazon-q-developer"),
+]]
 REVIEWS_IN_MESSAGE = {
     "Gerrit code reviews": re.compile(r"^Change-Id: (I[0-9a-f]{40})", re.M),
     "Phabricator code reviews": re.compile(r"^Differential Revision: \S*?D(\d+)", re.M),
@@ -2077,18 +2207,30 @@ def message_key(message):
 Change = namedtuple("Change", "date id key origins standard")
 
 
+AI_ROW = "changes marked as made with AI coding tools"
+
+
 class MessageScan:
     """Pull requests, code reviews and imported history named in commit messages."""
 
     def __init__(self):
         self.prs, self.reviews, self.imported = defaultdict(set), defaultdict(set), defaultdict(set)
         self.reverts = self.merges = 0   # changes whose first line says so (forms leave both out)
+        self.reviewed = 0                # changes whose message names a reviewer
+        self.ai = Counter()              # AI coding tool -> changes it marked
+        self.ai_changes = 0              # changes marked by any AI coding tool
         self.n = 0
 
-    def add(self, message):
-        """Notes what the message names. (message_key, origins, whether forms leave the change out
-        for its message: a merge or a revert)."""
+    def add(self, message, author=""):
+        """Notes what the message names. author: "name <email>", if known. (message_key, origins,
+        whether forms leave the change out for its message: a merge or a revert)."""
         self.n += 1
+        self.reviewed += bool(REVIEWER_IN_MESSAGE.search(message))
+        low = (author + "\n" + message).lower()
+        tools = ({tool for tool, pattern in AI_MARKERS if pattern.search(author) or pattern.search(message)}
+                 if any(cue in low for cue in AI_CUES) else ())
+        self.ai.update(tools)
+        self.ai_changes += bool(tools)
         subject = message.strip().split("\n", 1)[0]
         revert, merge = bool(re.search("revert", subject, re.I)), bool(re.match(r"merg(e|ed|ing)\b", subject, re.I))
         self.reverts += revert
@@ -2108,7 +2250,15 @@ class MessageScan:
 
     def reviews_found(self):
         return ([("merged pull requests named in commit messages", sum(len(s) for s in self.prs.values()))]
-                + [(label, len(s)) for label, s in self.reviews.items()])
+                + [(label, len(s)) for label, s in self.reviews.items()]
+                + [("changes whose message names a reviewer (Reviewed-by, Approved-by)", self.reviewed)])
+
+    def ai_found(self):
+        """Report rows for the changes AI coding tools marked, or []."""
+        if not self.ai_changes:
+            return []
+        return [(AI_ROW, self.ai_changes),
+                ("  marked by", ", ".join(f"{tool} {n:,}" for tool, n in self.ai.most_common()))]
 
     def imports_found(self):
         return [(label, len(s)) for label, s in self.imported.items() if s]
@@ -2161,6 +2311,7 @@ def history(vcs, unit, changes, merges=None, reviews=(), notes=(), scan=None, re
     if scan is not None and vcs != "Git":   # Git adds these after rows of its own
         rows += scan.imports_found()
         rows += [r for r in [dated_before_row(vcs, dates)] if r]
+        rows += scan.ai_found()
     return {"vcs": vcs, "unit": unit, "rows": rows, "reviews": [(label, n) for label, n in reviews if n],
             "notes": list(notes), "per_year": dict(sorted(per_year.items())), "dates": dates,
             "authors": sorted(set(authors)), "standard_commits": standard,
@@ -2241,7 +2392,7 @@ def git_history(root, servers=True):
         main_commits += sha in on_main
         if len(parents.split()) > 1:
             merges += 1
-        key, origins, _ = scan.add(body)
+        key, origins, _ = scan.add(body, f"{name} <{email}>")
         records.append(Change(date, sha, key, origins, None))
         vss_messages += bool(VSS_IN_MESSAGE.search(body))
     progress()
@@ -2261,6 +2412,9 @@ def git_history(root, servers=True):
             found.append((f"all pull requests on {remote} (open, closed, merged)", count))
         for remote, count in github_merged_pull_requests(root):
             found.append((f"merged pull requests on GitHub ({remote})", count))
+        for remote, approved, unreviewed in github_pull_request_reviews(root):
+            found += [(f"  of which approved in a review ({remote})", approved),
+                      (f"  of which merged without any review ({remote})", unreviewed)]
     for remote in unreachable:
         found.append((f"pull requests on {remote}", "couldn't connect"))
 
@@ -2277,7 +2431,11 @@ def git_history(root, servers=True):
                 notes, records=records)
     h["standard_commits"], h["standard_branch"] = standard[:2] if standard else (None, None)
     h["rows"].insert(1, ("  of which on the main branch (the one checked out)", main_commits))
-    h["rows"] += scan.imports_found() + git_conversion_traces(root)
+    coders = git_code_contributors(root)
+    if coders is not None:
+        at = next(i for i, (k, _) in enumerate(h["rows"]) if k == "contributors") + 1
+        h["rows"].insert(at, ("  of whom changed code (not just art, levels ...)", coders))
+    h["rows"] += scan.imports_found() + git_conversion_traces(root) + scan.ai_found()
     h["vss_messages"] = vss_messages
 
     # ####################
@@ -2480,13 +2638,54 @@ def github_merged_pull_requests(root):
         m = re.search(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", url)
         if not m:
             continue
-        # Run from the temporary folder, not the repository, so that gh has no repository to read.
-        import tempfile
-        out = run(["gh", "api", "-X", "GET", "search/issues", "-f", f"q=repo:{m.group(1)}/{m.group(2)} is:pr is:merged",
-                   "--jq", ".total_count"], tempfile.gettempdir(), 60)
-        if out and out.strip().isdigit():
-            found.append((remote, int(out.strip())))
+        count = github_search_count(f"{m.group(1)}/{m.group(2)}", "is:pr is:merged")
+        if count is not None:
+            found.append((remote, count))
     return found
+
+
+def github_search_count(owner_repo, query):
+    """How many issues and pull requests GitHub's search finds in owner/repo for query, asked
+    through gh (logged in), or None."""
+    import tempfile
+    out = run(["gh", "api", "-X", "GET", "search/issues", "-f", f"q=repo:{owner_repo} {query}", "--jq", ".total_count"],
+              tempfile.gettempdir(), 60)   # from the temporary folder, so that gh has no repository to read
+    return int(out.strip()) if out and out.strip().isdigit() else None
+
+
+def github_pull_request_reviews(root):
+    """[(remote, merged pull requests approved in a review, merged ones with no review at all)] for
+    GitHub remotes, asked through gh, if it's installed and logged in. Reviews by bots count too."""
+    found = []
+    for remote, url in ([] if OFFLINE else git_remotes(root)):
+        m = re.search(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", url)
+        if not m:
+            continue
+        approved = github_search_count(f"{m.group(1)}/{m.group(2)}", "is:pr is:merged review:approved")
+        unreviewed = github_search_count(f"{m.group(1)}/{m.group(2)}", "is:pr is:merged review:none")
+        if approved is not None and unreviewed is not None:
+            found.append((remote, approved, unreviewed))
+    return found
+
+
+# ####################
+# Who changed code
+# ####################
+# The files that are code, for git's pathspecs ("*.cpp" matches in every folder).
+CODE_PATHSPECS = sorted({f"*{ext}" for ext in CODE_EXTS} | {"*.uc", "*.verse"})
+
+
+def git_code_contributors(root):
+    """How many people (each counted once, as count_people counts them) made commits that changed
+    code files in root (pathspecs are relative to it: in a subfolder of a repository, only its own),
+    leaving out Epic's commits in a fork of Unreal Engine; the other contributors changed only other
+    files (art, levels, Blueprints, settings ...). None if git fails."""
+    out = run(["git", "log", "--all", "--invert-grep", "-E", "--grep", EPIC_GREP, "--format=%aN%x1f%aE", "--",
+               *CODE_PATHSPECS], root, 3600)
+    if out is None:
+        return None
+    authors = [tuple(line.split("\x1f", 1)) for line in out.splitlines() if "\x1f" in line]
+    return count_people(a for a in authors if not EPIC_EMAIL.search(a[1]))
 
 
 # ####################
@@ -5060,7 +5259,7 @@ def manifest_dependencies(path, name):
                                                              text)]
         elif low == "pom.xml":
             out += [("Java (Maven)", m) for m in re.findall(r"<artifactId>([^<]+)</artifactId>", text)[1:]]
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         pass
     return out
 
@@ -5193,6 +5392,753 @@ class Dependencies:
         folders = sorted((n for n in self.missing_includes() if n != "(headers in no folder)"
                           and not is_known_library(n) and dependency_key(n) not in keys), key=str.lower)
         return named + folders
+
+
+# #######################################
+# Game content: characters, items, props and levels
+# #######################################
+
+# What a game's assets are, as codebase forms ask for them (characters, items, props, levels): from
+# the classes Unreal Blueprints, data assets and C++ classes derive from, the components and scripts
+# of Unity prefabs, and the levels the project's settings put in the build. Names of classes, files
+# and levels are kept in memory only, to tie them together; reports give counts.
+
+# ##############################
+# What a class is, by the class it derives from
+# ##############################
+# Unreal's own classes (in lower case, without their A/U prefix) and the class each derives from,
+# as far as the kinds below need.
+UNREAL_ENGINE_PARENTS = {
+    "character": "pawn", "modularcharacter": "character", "pawn": "actor", "defaultpawn": "pawn",
+    "spectatorpawn": "defaultpawn", "wheeledvehiclepawn": "pawn", "wheeledvehicle": "pawn", "modularpawn": "pawn",
+    "controller": "actor", "playercontroller": "controller", "aicontroller": "controller",
+    "modularplayercontroller": "playercontroller", "modularaicontroller": "aicontroller",
+    "info": "actor", "gamemodebase": "info", "gamemode": "gamemodebase", "modulargamemode": "gamemode",
+    "modulargamemodebase": "gamemodebase", "gamestatebase": "info", "gamestate": "gamestatebase",
+    "modulargamestate": "gamestate", "modulargamestatebase": "gamestatebase", "playerstate": "info",
+    "modularplayerstate": "playerstate", "worldsettings": "info", "hud": "actor", "playercameramanager": "actor",
+    "functionaltest": "actor", "staticmeshactor": "actor", "skeletalmeshactor": "actor", "triggerbase": "actor",
+    "triggerbox": "triggerbase", "triggersphere": "triggerbase", "triggervolume": "volume", "volume": "brush",
+    "brush": "actor", "cameraactor": "actor", "emitter": "actor", "niagaraactor": "actor", "light": "actor",
+    "decalactor": "actor", "targetpoint": "actor", "note": "actor",
+    "actorcomponent": "object", "scenecomponent": "actorcomponent", "primitivecomponent": "scenecomponent",
+    "meshcomponent": "primitivecomponent", "staticmeshcomponent": "meshcomponent",
+    "skinnedmeshcomponent": "meshcomponent", "skeletalmeshcomponent": "skinnedmeshcomponent",
+    "movementcomponent": "actorcomponent", "pawnmovementcomponent": "movementcomponent",
+    "charactermovementcomponent": "pawnmovementcomponent", "userwidget": "object", "commonuserwidget": "userwidget",
+    "commonactivatablewidget": "commonuserwidget", "editorutilitywidget": "userwidget",
+    "editorutilityobject": "object", "editorutilityactor": "actor", "animinstance": "object",
+    "animnotify": "object", "animnotifystate": "object", "gameplayability": "object", "gameplayeffect": "object",
+    "bttask_blueprintbase": "object", "btservice_blueprintbase": "object", "btdecorator_blueprintbase": "object",
+    "envquerycontext_blueprintbase": "object", "gameinstance": "object", "savegame": "object",
+    "dataasset": "object", "primarydataasset": "dataasset", "blueprintfunctionlibrary": "object",
+    "cheatmanager": "object", "interface": "object",
+}
+# The kind of class each of those makes a class that derives from it, checked from the class itself up.
+UNREAL_CLASS_KINDS = {
+    "functionaltest": "Automated tests (functional tests)",
+    "editorutilitywidget": "Editor tools", "editorutilityobject": "Editor tools", "editorutilityactor": "Editor tools",
+    "character": "Characters (player, enemies, NPCs ...)",
+    "pawn": "Other pawns (vehicles, turrets, cameras ...)",
+    "controller": "Controllers (player input, AI)",
+    **dict.fromkeys(("gamemodebase", "gamestatebase", "playerstate", "hud", "gameinstance", "playercameramanager",
+                     "worldsettings", "savegame", "cheatmanager"),
+                    "Game rules and framework (game modes, states, HUD, saves ...)"),
+    "userwidget": "UI widgets",
+    **dict.fromkeys(("animinstance", "animnotify", "animnotifystate"), "Animation logic"),
+    **dict.fromkeys(("gameplayability", "gameplayeffect"), "Abilities and effects (Gameplay Ability System)"),
+    **dict.fromkeys(("bttask_blueprintbase", "btservice_blueprintbase", "btdecorator_blueprintbase",
+                     "envquerycontext_blueprintbase"), "AI tasks and queries"),
+    "actorcomponent": "Components (behaviour added to actors)",
+    "dataasset": "Data asset classes",
+    "actor": "Other actors (props, items, pickups, doors, spawners, projectiles ...)",
+    "object": "Other classes (objects, interfaces, function libraries ...)",
+}
+UNREAL_KIND_ORDER = list(dict.fromkeys(UNREAL_CLASS_KINDS.values()))
+UNREAL_KIND_UNKNOWN = "Derived from a class that isn't here (a plugin's or the engine's)"
+# An unknown engine or plugin class, by the end of its name: what it most likely is.
+UNREAL_SUFFIX_KINDS = [("character", "character"), ("pawn", "pawn"), ("controller", "controller"),
+                       ("gamemode", "gamemodebase"), ("component", "actorcomponent"), ("widget", "userwidget"),
+                       ("volume", "actor"), ("actor", "actor")]
+# Kinds of class whose members may be items, by their names (or their base classes').
+ITEM_NAME = re.compile(r"item|pickup|weapon|loot|collectib|collectab|consumable|equipment|equippable|armou?r|ammo|potion",
+                       re.I)
+ITEM_KINDS = {"Other actors (props, items, pickups, doors, spawners, projectiles ...)",
+              "Other classes (objects, interfaces, function libraries ...)", "Data asset classes"}
+
+
+def unreal_class_key(name):
+    """An Unreal class's name as UNREAL_ENGINE_PARENTS has them: lower case, without the A/U prefix of
+    a C++ class ("AHeroCharacter") or the _C of a Blueprint's class ("BP_Hero_C")."""
+    name = (name or "").lower()
+    if name.endswith("_c"):
+        return name[:-2]
+    return name
+
+
+def unreal_cpp_key(name):
+    """A C++ class's name ("AHeroCharacter", "UItemDefinition") as packages name it: without A/U."""
+    return (name[1:] if len(name) > 1 and name[0] in "AU" and name[1].isupper() else name).lower()
+
+
+def unreal_class_kind(key, parents):
+    """(kind, [the class and those it derives from]) for an Unreal class (see unreal_class_key);
+    parents: {class: the class it derives from}, from the Blueprints and C++ code read. A chain that
+    ends at a class that isn't here goes by that class's name (UNREAL_SUFFIX_KINDS)."""
+    chain = []
+    while key and key not in chain and len(chain) < 50:
+        chain.append(key)
+        if key in UNREAL_CLASS_KINDS:
+            return UNREAL_CLASS_KINDS[key], chain
+        key = parents.get(key) or UNREAL_ENGINE_PARENTS.get(key)
+    last = chain[-1] if chain else ""
+    base = next((k for suffix, k in UNREAL_SUFFIX_KINDS if last.endswith(suffix)), None)
+    return (UNREAL_CLASS_KINDS[base] if base else UNREAL_KIND_UNKNOWN), chain
+
+
+# ##############################
+# Unity: what a prefab or a ScriptableObject is
+# ##############################
+# Unity's text scene format names each component by class id: "--- !u!137 &..." is a SkinnedMeshRenderer.
+UNITY_COMPONENT = re.compile(rb"^--- !u!(\d+) ", re.M)
+UNITY_RIGGED, UNITY_ANIMATED = {137}, {95, 111}   # SkinnedMeshRenderer; Animator, Animation
+UNITY_CHARACTER_PARTS = {143, 195}                 # CharacterController, NavMeshAgent
+UNITY_SCRIPT = re.compile(rb"m_Script: \{fileID: 11500000, guid: ([0-9a-fA-F]{32})")
+UNITY_HUMANOID = re.compile(rb"^\s*animationType: 3\s*$", re.M)   # a model imported with Unity's humanoid rig
+UNITY_READ = 4 * 1024 * 1024    # bytes of a prefab read, at most: its components come first
+UNITY_PREFAB_KINDS = ["Characters and creatures (rigged and animated, a character controller or nav agent)",
+                      "Items, weapons and pickups (by the names of their scripts)",
+                      "Other prefabs (props, scenery, effects, UI ...)"]
+
+# ##############################
+# Levels
+# ##############################
+# Words that mark a level as a test, a prototype or work in progress, in its name or folder.
+LEVEL_TEST_WORDS = {"test", "tests", "testing", "testmap", "dev", "debug", "sandbox", "prototype", "prototypes", "proto",
+                    "playground", "gym", "developers", "wip", "old", "backup", "temp", "tmp", "example", "examples",
+                    "demo", "showcase", "template", "templates", "untitled", "experimental", "scratch", "greybox",
+                    "graybox", "blockout", "whitebox", "lookdev", "unused", "deprecated", "archive"}
+UNREAL_MAP_SETTING = re.compile(r"^\s*(?:GameDefaultMap|ServerDefaultMap|EditorStartupMap|TransitionMap)\s*=\s*"
+                                r"\"?(/[^\s\"]+)", re.M | re.I)
+UNREAL_MAPS_TO_COOK = re.compile(r"^\s*\+?MapsToCook\s*=\s*\(\s*FilePath\s*=\s*\"([^\"]+)\"", re.M | re.I)
+UNREAL_COOK_DIRS = re.compile(r"^\s*\+?DirectoriesToAlwaysCook\s*=\s*\(\s*Path\s*=\s*\"([^\"]+)\"", re.M | re.I)
+UNITY_BUILD_SCENE = re.compile(rb"enabled:\s*(\d)\s*\n\s*path:\s*([^\r\n]+)")
+SETTINGS_READ = 2 * 1024 * 1024   # bytes of a settings file read, at most
+
+
+def read_settings_file(path, limit=SETTINGS_READ):
+    """The start of a project's settings file (an .ini, a .uproject, a Unity .asset), as bytes, or
+    b"". Links aren't followed, and only regular files are read."""
+    try:
+        if is_link(path) or not os.path.isfile(path):
+            return b""
+        with open(path, "rb") as f:
+            return f.read(limit)
+    except OSError:
+        return b""
+
+
+def level_words(rel):
+    """The words of a level's path: its folders and name, split at separators and capitals."""
+    words = set()
+    for part in re.split(r"[\\/]", os.path.splitext(rel)[0]):
+        words.update(w.lower() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", part))
+        words.add(part.lower())
+    return words
+
+
+def unreal_map_file(project_rel, path):
+    """The .umap file (relative to the scanned folder, lower case, "/") for an Unreal package path
+    under /Game/ ("/Game/Maps/Main.Main" or "/Game/Maps/Main"), or None for another root's."""
+    if not path.lower().startswith("/game/"):
+        return None
+    path = path[len("/game/"):].split(".", 1)[0]
+    base = "" if project_rel in ("", ".") else project_rel.replace(os.sep, "/").lower() + "/"
+    return f"{base}content/{path.lower()}.umap"
+
+
+# ##############################
+# Collecting and reporting
+# ##############################
+class GameContent:
+    """Collects, while the folder is walked, what the game's assets are: see above."""
+
+    def __init__(self):
+        self.unreal = []              # (own?, main class, Blueprint class, parent) of each Unreal package read
+        self.cpp = []                 # (own?, class, parent) of each Unreal C++ class (UCLASS)
+        self.unity_scripts = {}       # guid -> script class name (its file's name)
+        self.prefabs = []             # (own?, component ids, script guids) of each text prefab
+        self.binary_prefabs = Counter()   # own? -> prefabs saved in Unity's binary format
+        self.scriptables = []         # (own?, script guid) of each ScriptableObject asset
+        self.humanoids = Counter()    # own? -> models with Unity's humanoid rig
+        self.levels = []              # (own?, path relative to the scanned folder, lower case, "/", its words)
+        self.unreal_projects = []     # (folder, relative folder) of each .uproject
+        self.unity_projects = []      # (folder, relative folder) of each Unity project
+
+    # ####################
+    # During the walk
+    # ####################
+
+    def saw_project(self, kinds, dirpath, rel):
+        if "Unreal" in kinds:
+            self.unreal_projects.append((dirpath, rel))
+        if "Unity" in kinds:
+            self.unity_projects.append((dirpath, rel))
+
+    def saw_unreal_package(self, own, info):
+        if info and info["status"] == "read":
+            self.unreal.append((own, info["main_class"], info["generated"], info["parent"]))
+
+    def saw_uclasses(self, own, classes):
+        self.cpp += [(own, name, parent) for name, parent in classes]
+
+    def saw_unity_script(self, path):
+        guid = meta_guid(path)
+        if guid:
+            self.unity_scripts[guid] = os.path.splitext(os.path.basename(path))[0]
+
+    def saw_prefab(self, own, path):
+        data = read_settings_file(path, UNITY_READ)
+        if not data.startswith(b"%YAML"):
+            self.binary_prefabs[own] += bool(data)
+            return
+        components = {int(n) for n in UNITY_COMPONENT.findall(data)}
+        self.prefabs.append((own, frozenset(components), tuple(g.decode().lower() for g in UNITY_SCRIPT.findall(data))))
+
+    def saw_unity_asset(self, own, path):
+        data = read_settings_file(path, 4096)
+        if data.startswith(b"%YAML") and re.search(rb"^--- !u!114 ", data, re.M):   # a MonoBehaviour: ScriptableObject
+            m = UNITY_SCRIPT.search(data)
+            if m:
+                self.scriptables.append((own, m.group(1).decode().lower()))
+
+    def saw_unity_model(self, own, path):
+        if UNITY_HUMANOID.search(read_settings_file(path + ".meta", 1024 * 1024)):
+            self.humanoids[own] += 1
+
+    def saw_level(self, own, rel_file):
+        self.levels.append((own, rel_file.replace(os.sep, "/").lower(), level_words(rel_file)))
+
+    # ####################
+    # The report
+    # ####################
+
+    def unreal_report(self):
+        out, facts = [], {}
+        parents = {}
+        for _, _, generated, parent in self.unreal:
+            if generated and parent:
+                parents.setdefault(unreal_class_key(generated), unreal_class_key(parent))
+        for _, name, parent in self.cpp:
+            parents.setdefault(unreal_cpp_key(name), unreal_cpp_key(parent))
+
+        # Blueprint classes, by what they derive from
+        kinds, items, theirs = Counter(), Counter(), 0
+        meshes = {c: Counter() for c in ("SkeletalMesh", "Skeleton", "StaticMesh")}
+        data_assets, data_items = 0, 0
+        for own, main, generated, _ in self.unreal:
+            if main in meshes:
+                meshes[main][own] += 1
+            if generated:
+                if not own:
+                    theirs += 1
+                    continue
+                kind, chain = unreal_class_kind(unreal_class_key(generated), parents)
+                kinds[kind] += 1
+                items[kind] += kind in ITEM_KINDS and any(ITEM_NAME.search(k) for k in chain)
+            elif own and main and not main.endswith("Blueprint"):
+                # An asset whose class is one of the game's (or a plugin's) own: a data asset
+                kind, chain = unreal_class_kind(unreal_class_key(main), parents)
+                if kind == "Data asset classes":
+                    data_assets += 1
+                    data_items += any(ITEM_NAME.search(k) for k in chain)
+        cpp_kinds = Counter()
+        cpp_items = 0
+        for own, name, _ in self.cpp:
+            if own:
+                kind, chain = unreal_class_kind(unreal_cpp_key(name), parents)
+                cpp_kinds[kind] += 1
+                cpp_items += kind in ITEM_KINDS and any(ITEM_NAME.search(k) for k in chain)
+        if not (kinds or cpp_kinds or any(sum(c.values()) for c in meshes.values())):
+            return out, facts
+
+        out += ["", "Unreal gameplay content: classes by what they derive from (the studio's own; names stay out of",
+                "this report). Blueprints and C++ classes side by side show how the logic is split between them:",
+                f"  {'':<70} {'Blueprints':>10} {'C++':>8}"]
+        for kind in UNREAL_KIND_ORDER + [UNREAL_KIND_UNKNOWN]:
+            if kinds[kind] or cpp_kinds[kind]:
+                out.append(f"  {kind:<70} {kinds[kind]:>10,} {cpp_kinds[kind]:>8,}")
+        out.append(f"  {'TOTAL':<70} {sum(kinds.values()):>10,} {sum(cpp_kinds.values()):>8,}")
+        n_items = sum(items.values())
+        if n_items or cpp_items:
+            out.append(f"  (of which items, weapons or pickups, by their own or a base class's name: {n_items:,} Blueprints,"
+                       f" {cpp_items:,} C++ classes)")
+        if data_assets:
+            out.append(f"  Data assets of the game's own data classes: {data_assets:,}"
+                       + (f" (of which items, weapons or pickups, by their class's name: {data_items:,})" if data_items else ""))
+        if theirs:
+            out.append(f"  (plus {theirs:,} Blueprint classes in plugins, packs or Epic's content, not counted)")
+        for cls, label in (("SkeletalMesh", "Skeletal meshes (rigged models: characters, creatures, weapons ...)"),
+                           ("Skeleton", "Skeletons (about one for each distinct body or rig)"),
+                           ("StaticMesh", "Static meshes (props, scenery, architecture ...)")):
+            if sum(meshes[cls].values()):
+                out.append(f"  {label:<70} {meshes[cls][True]:>10,}" + (f"   (plus {meshes[cls][False]:,} someone else's)"
+                                                                        if meshes[cls][False] else ""))
+        facts = {"blueprint_classes": dict(kinds), "blueprint_items": n_items, "cpp_classes": dict(cpp_kinds),
+                 "cpp_items": cpp_items, "data_assets": data_assets, "data_asset_items": data_items,
+                 "blueprint_classes_someone_elses": theirs,
+                 "meshes": {cls: {"own": c[True], "someone_elses": c[False]} for cls, c in meshes.items()}}
+        return out, facts
+
+    def unity_report(self):
+        out, facts = [], {}
+        kinds = {own: Counter() for own in (True, False)}
+        for own, components, guids in self.prefabs:
+            names = [self.unity_scripts.get(g, "") for g in guids]
+            if (components & UNITY_RIGGED and components & UNITY_ANIMATED) or components & UNITY_CHARACTER_PARTS:
+                kinds[own][UNITY_PREFAB_KINDS[0]] += 1
+            elif any(ITEM_NAME.search(n) for n in names):
+                kinds[own][UNITY_PREFAB_KINDS[1]] += 1
+            else:
+                kinds[own][UNITY_PREFAB_KINDS[2]] += 1
+        scriptables = Counter(own for own, _ in self.scriptables)
+        scriptable_items = sum(1 for own, g in self.scriptables if own and ITEM_NAME.search(self.unity_scripts.get(g, "")))
+        if not (self.prefabs or self.binary_prefabs or self.scriptables or self.humanoids):
+            return out, facts
+        out += ["", "Unity gameplay content: prefabs by their components and scripts (the studio's own; names stay out",
+                "of this report):"]
+        for kind in UNITY_PREFAB_KINDS:
+            if kinds[True][kind] or kinds[False][kind]:
+                out.append(f"  {kind:<84} {kinds[True][kind]:>8,}"
+                           + (f"   (plus {kinds[False][kind]:,} someone else's)" if kinds[False][kind] else ""))
+        if sum(self.binary_prefabs.values()):
+            out.append(f"  Prefabs saved in Unity's binary format, so not looked into: {self.binary_prefabs[True]:,}"
+                       + (f" (plus {self.binary_prefabs[False]:,} someone else's)" if self.binary_prefabs[False] else ""))
+        if sum(scriptables.values()):
+            out.append(f"  ScriptableObject data assets: {scriptables[True]:,}"
+                       + (f" (of which items, weapons or pickups, by their class's name: {scriptable_items:,})"
+                          if scriptable_items else "")
+                       + (f"; plus {scriptables[False]:,} someone else's" if scriptables[False] else ""))
+        if sum(self.humanoids.values()):
+            out.append(f"  Models imported with Unity's humanoid rig (characters): {self.humanoids[True]:,}"
+                       + (f" (plus {self.humanoids[False]:,} someone else's)" if self.humanoids[False] else ""))
+        facts = {"prefabs": {k: kinds[True][k] for k in UNITY_PREFAB_KINDS},
+                 "prefabs_someone_elses": {k: kinds[False][k] for k in UNITY_PREFAB_KINDS},
+                 "binary_prefabs": self.binary_prefabs[True], "scriptable_objects": scriptables[True],
+                 "scriptable_object_items": scriptable_items, "humanoid_models": self.humanoids[True]}
+        return out, facts
+
+    def levels_report(self):
+        own = [rel for o, rel, _ in self.levels if o]
+        theirs = len(self.levels) - len(own)
+        if not own and not theirs:
+            return [], {}
+
+        # ####################
+        # The levels the project's settings put in the build
+        # ####################
+        listed, unlisted_packaging, in_build_settings = set(), [], set()
+        cook_dirs = []
+        for dirpath, rel in self.unreal_projects:
+            text = b"\n".join(read_settings_file(os.path.join(dirpath, "Config", name))
+                              for name in ("DefaultEngine.ini", "DefaultGame.ini")).decode("utf-8", "replace")
+            to_cook = UNREAL_MAPS_TO_COOK.findall(text)
+            for path in UNREAL_MAP_SETTING.findall(text) + to_cook:
+                listed.add(unreal_map_file(rel, path))
+            for path in UNREAL_COOK_DIRS.findall(text):
+                folder = unreal_map_file(rel, path.rstrip("/") + "/x")
+                if folder:
+                    cook_dirs.append(folder.rsplit("/", 1)[0] + "/")
+            if not to_cook and not UNREAL_COOK_DIRS.search(text):
+                # Then packaging takes every level in the project's Content folder.
+                unlisted_packaging.append(rel)
+                cook_dirs.append(("" if rel in ("", ".") else rel.replace(os.sep, "/").lower() + "/") + "content/")
+        for dirpath, rel in self.unity_projects:
+            base = "" if rel in ("", ".") else rel.replace(os.sep, "/").lower() + "/"
+            data = read_settings_file(os.path.join(dirpath, "ProjectSettings", "EditorBuildSettings.asset"))
+            for enabled, path in UNITY_BUILD_SCENE.findall(data):
+                if enabled == b"1":
+                    in_build_settings.add(base + path.decode("utf-8", "replace").strip().strip("\"'").lower())
+        listed.discard(None)
+        in_build = [rel for rel in own if rel in listed or rel in in_build_settings or rel.startswith(tuple(cook_dirs))]
+        test_like = [rel for o, rel, words in self.levels if o and words & LEVEL_TEST_WORDS]
+
+        # ####################
+        # Report lines
+        # ####################
+        out = ["", f"Levels and scenes: {len(own):,} of the studio's own" + (f" (plus {theirs:,} someone else's)" if theirs else "")]
+        if self.unreal_projects or self.unity_projects:
+            out.append(f"  In the build, as the project's settings list them: {len(in_build):,}"
+                       + (" (Unreal: the default maps, and the maps and folders to package)" if self.unreal_projects else "")
+                       + (" (Unity: the scenes ticked in Build Settings)" if self.unity_projects else ""))
+            if unlisted_packaging:
+                out.append("  (an Unreal project lists no maps to package, so packaging it includes every level, as counted here)")
+        if test_like:
+            out.append(f"  Named like test, prototype or work-in-progress levels: {len(test_like):,} (Test, Dev, Sandbox,"
+                       " Developers, WIP ... in their name or folder)")
+        facts = {"own": len(own), "someone_elses": theirs,
+                 "in_build": len(in_build) if (self.unreal_projects or self.unity_projects) else None,
+                 "unreal_lists_no_maps_to_package": bool(unlisted_packaging), "test_like": len(test_like)}
+        return out, facts
+
+    def report(self):
+        out, facts = [], {}
+        for key, section in (("unreal", self.unreal_report), ("unity", self.unity_report), ("levels", self.levels_report)):
+            lines, got = section()
+            out += lines
+            if got:
+                facts[key] = got
+        return out, facts
+
+
+# #######################################
+# Online services and multiplayer
+# #######################################
+
+# What the game connects to, for "does it run without the studio's servers?": the online services
+# its plugins, packages, SDKs and settings name, its multiplayer code, and the web addresses in its
+# code and settings. Only the services' names are reported; the studio's own web addresses are
+# counted, never named.
+
+# ##############################
+# Services, by the names of their plugins, packages and SDKs, and by their hosts
+# ##############################
+ONLINE_SERVICES = [   # (service, what for, plugin/package/library names, hosts)
+    ("Steam", "store platform: achievements, friends, sessions, networking",
+     r"onlinesubsystemsteam|steamsockets|steamworks|steamcore|advancedsteamsessions|steamshared|steamintegration"
+     r"|facepunch\.steamworks|rlabrecque", r"^(api\.steampowered\.com|partner\.steam-api\.com)$"),
+    ("Epic Online Services", "accounts, sessions, achievements, voice",
+     r"onlinesubsystemeos|onlineserviceseos|eosshared|eossdk|eosvoicechat|eosoverlay|redpoint.?eos|playeveryware"
+     r"|epic online services|^eos$|eosplus", r"(^|\.)epicgames\.dev$|^api\.epicgames\.com$"),
+    ("Xbox network (Microsoft GDK)", "platform: accounts, achievements, multiplayer",
+     r"onlinesubsystemgdk|onlinesubsystemlive|onlineservicesgdk|xboxlive|xsapi", r"(^|\.)xboxlive\.com$"),
+    ("PlayStation Network", "platform: accounts, trophies, multiplayer",
+     r"onlinesubsystemps[345]|onlinesubsystemsony|onlineservicesps5|nptoolkit", r"(^|\.)playstation\.(net|com)$"),
+    ("Nintendo Switch online", "platform: accounts, multiplayer", r"onlinesubsystemswitch|onlinesubsystemnx", None),
+    ("Google Play Games", "platform: accounts, achievements",
+     r"onlinesubsystemgoogleplay|googleplaygames|com\.google\.play\.games|playgamesplugin", None),
+    ("Apple Game Center", "platform: accounts, achievements", r"onlinesubsystemios|onlinesubsystemapple|gamecenter",
+     None),
+    ("Meta Quest platform", "platform: accounts, achievements, multiplayer",
+     r"onlinesubsystemoculus|oculusplatform|metaxrplatform|com\.meta\.xr\.sdk\.platform|ovrplatform", None),
+    ("PlayFab (Microsoft)", "backend: accounts, player data, economy, matchmaking", r"playfab",
+     r"(^|\.)playfab(api)?\.com$"),
+    ("Amazon GameLift", "hosted dedicated servers", r"gamelift", r"gamelift"),
+    ("Amazon Web Services", "cloud servers, storage, functions", r"aws-?sdk|awscore|amazon\.lambda|cognito|dynamodb",
+     r"(^|\.)amazonaws\.com$|(^|\.)cloudfront\.net$|\.lambda-url\."),
+    ("Microsoft Azure", "cloud servers, storage, functions", r"microsoft\.azure|^azure[.-]|@azure/|azure-?sdk",
+     r"(^|\.)(azurewebsites|azure-api|azurefd|cloudapp|windows)\.net$|(^|\.)azure\.com$"),
+    ("Google (Firebase, Cloud, sign-in)", "backend: accounts, database, analytics, crash reports", r"firebase|google\.cloud",
+     r"(^|\.)(firebaseio|firebaseapp|googleapis|cloudfunctions|appspot)\.com$|(^|\.)(web|run)\.app$"),
+    ("Unity Gaming Services", "backend: accounts, lobbies, relay, cloud saves, matchmaking",
+     r"com\.unity\.services\.(?!core$|analytics$|vivox$)", r"\.services\.api\.unity\.com$"),
+    ("Unity Analytics", "analytics", r"com\.unity\.services\.analytics|com\.unity\.analytics", None),
+    ("Unity Cloud Diagnostics", "crash reporting", r"com\.unity\.cloud\.diagnostics", None),
+    ("Unity In-App Purchasing", "purchases", r"com\.unity\.purchasing", None),
+    ("Photon (Exit Games)", "hosted multiplayer servers", r"photon|exitgames", r"(^|\.)(exitgames|photonengine)\.(com|io)$"),
+    ("Normcore", "hosted multiplayer servers", r"normcore", r"(^|\.)normcore\.io$"),
+    ("Vivox", "voice chat", r"vivox", r"(^|\.)vivox\.com$"),
+    ("Discord", "social: rich presence, invites", r"discord", r"^(discord(app)?\.com|.+\.discord(app)?\.com)$"),
+    ("Sentry", "crash reporting", r"sentry", r"(^|\.)sentry\.io$"),
+    ("BugSplat", "crash reporting", r"bugsplat", r"(^|\.)bugsplat\.com$"),
+    ("Backtrace", "crash reporting", r"io\.backtrace|backtrace-?unreal|backtraceio|^backtrace$", r"(^|\.)backtrace\.io$"),
+    ("GameAnalytics", "analytics", r"gameanalytics", r"(^|\.)gameanalytics\.com$"),
+    ("Nakama (Heroic Labs)", "backend: accounts, multiplayer, leaderboards", r"nakama|heroiclabs", r"(^|\.)heroiclabs\.com$"),
+    ("AccelByte", "backend: accounts, multiplayer, economy", r"accelbyte", r"(^|\.)accelbyte\.io$"),
+    ("brainCloud", "backend: accounts, player data", r"braincloud", r"(^|\.)braincloudservers\.com$"),
+    ("LootLocker", "backend: accounts, player data, leaderboards", r"lootlocker", r"(^|\.)lootlocker\.(io|com)$"),
+    ("Beamable", "backend: accounts, player data, economy", r"beamable", r"(^|\.)beamable\.com$"),
+    ("Hathora", "hosted dedicated servers", r"hathora", r"(^|\.)hathora\.(dev|com)$"),
+    ("Edgegap", "hosted dedicated servers", r"edgegap", r"(^|\.)edgegap\.(com|net)$"),
+    ("Agones", "dedicated servers on the studio's own Kubernetes", r"agones", None),
+    ("mod.io", "mods", r"modio|mod\.io", r"(^|\.)(mod\.io|modapi\.io)$"),
+    ("Twitch", "streaming integration", r"twitch", r"(^|\.)twitch\.tv$"),
+    ("Xsolla", "payments", r"xsolla", r"(^|\.)xsolla\.com$"),
+    ("SpatialOS (Improbable)", "hosted multiplayer (discontinued)", r"spatialgdk|improbable", r"(^|\.)improbable\.io$"),
+    ("GameSparks", "backend (shut down in 2022)", r"gamesparks", r"(^|\.)gamesparks\.net$"),
+    ("Web game portals (Poki, CrazyGames, GameMonetize ...)", "portal SDKs: ads, accounts, saves",
+     r"poki-?sdk|crazygames|gamemonetize|gamedistribution", r"(^|\.)(poki\.com|crazygames\.com|gamemonetize\.com"
+     r"|gamedistribution\.com|fuseplatform\.net)$"),
+    ("Cloudflare", "web hosting, bot checks, CDN", r"cloudflare", r"(^|\.)(cloudflare\.com|workers\.dev|pages\.dev)$"),
+    ("Mobile ads (AdMob, Unity Ads, AppLovin, ironSource ...)", "advertising",
+     r"googlemobileads|admob|com\.unity\.ads|unityads|applovin|ironsource|chartboost|vungle|adcolony", None),
+    ("Mirror", "multiplayer networking library: someone has to run the servers", r"^mirror$|mirrornetworking", None),
+    ("Fish-Net", "multiplayer networking library: someone has to run the servers", r"fishnet|fish-networking", None),
+    ("Netcode for GameObjects", "multiplayer networking library: someone has to run the servers",
+     r"com\.unity\.netcode", None),
+    ("Riptide, LiteNetLib or DarkRift", "multiplayer networking library: someone has to run the servers",
+     r"riptide|litenetlib|darkrift", None),
+]
+ONLINE_SERVICES = [(name, purpose, re.compile(names, re.I), re.compile(hosts, re.I) if hosts else None)
+                   for name, purpose, names, hosts in ONLINE_SERVICES]
+# Hosts that don't mean the game connects to anything: standards, documentation, licences, code
+# hosting, package registries, fonts and scripts for web pages, social and store links.
+NOISE_HOSTS = re.compile(
+    r"(^|\.)(w3\.org|xmlsoap\.org|json-schema\.org|schema\.org|schemas\.\w+\.\w+|purl\.org|ietf\.org|ogp\.me"
+    r"|example\.(com|org|net)|localhost|apache\.org|opensource\.org|gnu\.org|mozilla\.org|creativecommons\.org"
+    r"|github\.com|githubusercontent\.com|github\.io|gitlab\.com|bitbucket\.org|sourceforge\.net"
+    r"|npmjs\.(org|com)|yarnpkg\.com|nuget\.org|pypi\.org|python\.org|maven\.org|gradle\.org|jcenter\.bintray\.com"
+    r"|unity3d\.com|unity\.com|unrealengine\.com|epicgames\.com|microsoft\.com|msdn\.com|visualstudio\.com"
+    r"|apple\.com|android\.com|google\.com|googlesource\.com|fonts\.googleapis\.com|gstatic\.com|youtube\.com|youtu\.be"
+    r"|wikipedia\.org|stackoverflow\.com|stackexchange\.com|twitter\.com|x\.com|facebook\.com|instagram\.com"
+    r"|tiktok\.com|reddit\.com|discord\.gg|steamcommunity\.com|store\.steampowered\.com|itch\.io|patreon\.com"
+    r"|cdnjs\.cloudflare\.com|jsdelivr\.net|unpkg\.com|bootstrapcdn\.com|jquery\.com|khronos\.org|opengl\.org"
+    r"|adobe\.com|amazon\.com|fsf\.org|boost\.org|cmake\.org|llvm\.org|isocpp\.org|cppreference\.com"
+    r"|schemastore\.org|biomejs\.dev|eslint\.org|prettier\.io|typescriptlang\.org|ko-fi\.com|buymeacoffee\.com"
+    r"|networkadvertising\.org|aboutads\.info|linkedin\.com|cdnjs\.com)$"
+    r"|^127\.|^0\.0\.0\.0$", re.I)
+# Unreal: the online platform DefaultEngine.ini makes the default, and where crash reports go.
+UNREAL_PLATFORM_SERVICE = re.compile(r"^\s*DefaultPlatformService\s*=\s*\"?(\w+)", re.M | re.I)
+UNREAL_SUBSYSTEM_ENABLED = re.compile(r"^\[OnlineSubsystem(\w+)\][^\[]*?^\s*bEnabled\s*=\s*true", re.M | re.I)
+UNREAL_CRASH_URL = re.compile(r"^\[CrashReportClient\][^\[]*?^\s*DataRouterUrl\s*=\s*\"?https?://", re.M | re.I)
+PLATFORM_SERVICE_NAMES = {"steam": "Steam", "eos": "Epic Online Services", "eosplus": "Epic Online Services",
+                          "redpointeos": "Epic Online Services", "gdk": "Xbox network (Microsoft GDK)",
+                          "live": "Xbox network (Microsoft GDK)", "googleplay": "Google Play Games",
+                          "ios": "Apple Game Center", "apple": "Apple Game Center", "oculus": "Meta Quest platform"}
+# Unity: the cloud services ProjectSettings/UnityConnectSettings.asset switches on.
+UNITY_CONNECT_SERVICES = {b"CrashReportingSettings": "Unity Cloud Diagnostics", b"UnityAnalyticsSettings": "Unity Analytics",
+                          b"UnityPurchasingSettings": "Unity In-App Purchasing",
+                          b"UnityAdsSettings": "Mobile ads (AdMob, Unity Ads, AppLovin, ironSource ...)"}
+
+
+def online_service(name=None, host=None):
+    """The service (as ONLINE_SERVICES names it) a plugin, package or library name, or a host, is of."""
+    for service, _, names, hosts in ONLINE_SERVICES:
+        if (name and names.search(name)) or (host and hosts and hosts.search(host)):
+            return service
+    return None
+
+
+class OnlineServices:
+    """Collects, while the folder is walked, what the game connects to: see above."""
+
+    def __init__(self):
+        self.evidence = defaultdict(set)   # service -> how it was found ("plugin enabled", "package" ...)
+        self.hosts = set()                 # hosts in the studio's code and settings (kept in memory only)
+        self.web_files = self.multiplayer_files = 0
+        self.server_targets = 0            # Unreal's *Server.Target.cs: a dedicated server is built
+        self.crash_url = False             # crash reports go to a server set in DefaultEngine.ini
+        self.disabled_plugins = set()      # plugins a .uproject switches off (lower case)
+
+    # ####################
+    # During the walk
+    # ####################
+
+    def saw_name(self, name, how):
+        service = online_service(name=name)
+        if service:
+            self.evidence[service].add(how)
+
+    def saw_unreal_project(self, dirpath, uproject):
+        try:
+            plugins = json.loads(read_settings_file(os.path.join(dirpath, uproject)).decode("utf-8-sig", "replace"))
+            plugins = plugins.get("Plugins") if isinstance(plugins, dict) else []
+        except (ValueError, RecursionError):
+            plugins = []
+        if not isinstance(plugins, list):
+            plugins = []
+        for p in plugins:
+            if isinstance(p, dict) and p.get("Name"):
+                if p.get("Enabled", True):
+                    self.saw_name(str(p["Name"]), "plugin enabled in the .uproject")
+                else:
+                    self.disabled_plugins.add(str(p["Name"]).lower())
+        text = read_settings_file(os.path.join(dirpath, "Config", "DefaultEngine.ini")).decode("utf-8", "replace")
+        for name in UNREAL_PLATFORM_SERVICE.findall(text):
+            service = PLATFORM_SERVICE_NAMES.get(name.lower())
+            if service:
+                self.evidence[service].add("the default online platform in DefaultEngine.ini")
+        for name in UNREAL_SUBSYSTEM_ENABLED.findall(text):
+            service = PLATFORM_SERVICE_NAMES.get(name.lower())
+            if service:
+                self.evidence[service].add("switched on in DefaultEngine.ini")
+        self.crash_url |= bool(UNREAL_CRASH_URL.search(text))
+
+    def saw_unity_project(self, dirpath):
+        data = read_settings_file(os.path.join(dirpath, "ProjectSettings", "UnityConnectSettings.asset"))
+        for block, service in UNITY_CONNECT_SERVICES.items():
+            m = re.search(rb"^  " + block + rb":\s*\n((?:    .*\n?)*)", data, re.M)
+            if m and re.search(rb"^    m_Enabled: 1", m.group(1), re.M):
+                self.evidence[service].add("switched on in Unity's project settings")
+
+    def saw_code(self, code):
+        self.web_files += code["web"]
+        self.multiplayer_files += code["replication"]
+        self.hosts |= code["hosts"]
+
+    # ####################
+    # The report
+    # ####################
+
+    def report(self):
+        """(report lines, summary line, facts)."""
+        for host in self.hosts:
+            service = None if NOISE_HOSTS.search(host) else online_service(host=host)
+            if service:
+                self.evidence[service].add("its web address in the code or settings")
+        known = {h for h in self.hosts if not NOISE_HOSTS.search(h) and online_service(host=h)}
+        other = {h for h in self.hosts if not NOISE_HOSTS.search(h) and h not in known}
+        purposes = {name: purpose for name, purpose, _, _ in ONLINE_SERVICES}
+        found = [name for name, _, _, _ in ONLINE_SERVICES if name in self.evidence]
+        out = ["", "Online services and multiplayer (from the plugins, packages, SDKs, settings and code; whether the game",
+               "runs without the studio's servers, and whether its online features work, takes a test):"]
+        for name in found:
+            out.append(f"  {name:<44} {purposes[name]}")
+            out.append(f"  {'':<44} ({'; '.join(sorted(self.evidence[name]))})")
+        if not found:
+            out.append("  No online service found (no online plugins, SDKs, packages or settings this script knows)")
+        if self.multiplayer_files:
+            out.append(f"  Multiplayer code (replication, RPCs: the game's state sent to other players):"
+                       f" {plural(self.multiplayer_files, 'file')} of the studio's code")
+        if self.server_targets:
+            out.append(f"  A dedicated server is built ({plural(self.server_targets, 'Server target')}): someone has"
+                       " to run the servers")
+        if self.crash_url:
+            out.append("  Crash reports go to a server set in DefaultEngine.ini (CrashReportClient's DataRouterUrl)")
+        if self.web_files:
+            out.append(f"  Code that makes web requests: {plural(self.web_files, 'file')}")
+        if known or other:
+            out.append(f"  Web addresses in the studio's code and settings: {plural(len(known), 'host')} of the services above"
+                       + (f", {plural(len(other), 'other host')} (not named here: ask the studio what each is, and"
+                          " whether the game needs it)" if other else ""))
+        bits = found[:4] + ([f"and {len(found) - 4} more"] if len(found) > 4 else [])
+        if self.multiplayer_files:
+            bits.append("multiplayer code")
+        if self.server_targets:
+            bits.append("a dedicated server")
+        if other:
+            bits.append(plural(len(other), "other web host"))
+        summary = "  Online services: " + (", ".join(bits) if bits else "none found")
+        facts = {"services": {name: sorted(self.evidence[name]) for name in found},
+                 "multiplayer_files": self.multiplayer_files, "dedicated_server_targets": self.server_targets,
+                 "crash_reports_to_own_server": self.crash_url, "web_request_files": self.web_files,
+                 "service_hosts": len(known), "other_hosts": len(other)}
+        return out, summary, facts
+
+
+# #######################################
+# How the studio works: tests, build automation, AI tools, documents
+# #######################################
+
+# ##############################
+# Files that show it, by their path (relative, lower case, "/")
+# ##############################
+CI_FILES = [
+    ("GitHub Actions", r"(^|/)\.github/workflows/[^/]+\.ya?ml$"), ("GitLab CI", r"(^|/)\.gitlab-ci\.ya?ml$"),
+    ("Jenkins", r"(^|/)jenkinsfile[^/]*$"), ("Azure Pipelines", r"(^|/)azure-pipelines[^/]*\.ya?ml$"),
+    ("CircleCI", r"(^|/)\.circleci/config\.ya?ml$"), ("Bitbucket Pipelines", r"(^|/)bitbucket-pipelines\.ya?ml$"),
+    ("Travis CI", r"(^|/)\.travis\.ya?ml$"), ("AppVeyor", r"(^|/)\.?appveyor\.ya?ml$"), ("TeamCity", r"(^|/)\.teamcity/"),
+    ("Buildkite", r"(^|/)\.buildkite/"), ("Drone", r"(^|/)\.drone\.ya?ml$"),
+    ("Gitea / Forgejo Actions", r"(^|/)\.(gitea|forgejo)/workflows/"), ("Codemagic", r"(^|/)codemagic\.ya?ml$"),
+    ("Bitrise", r"(^|/)bitrise\.ya?ml$"), ("Google Cloud Build", r"(^|/)cloudbuild\.ya?ml$"),
+    ("fastlane", r"(^|/)fastlane/fastfile$"), ("Unreal BuildGraph", r"buildgraph[^/]*\.xml$"),
+]
+CI_FILES = [(name, re.compile(pattern)) for name, pattern in CI_FILES]
+AI_TOOL_FILES = [
+    ("Claude Code", r"(^|/)(claude(\.local)?\.md$|\.claude/)"), ("AGENTS.md (Codex and other agents)", r"(^|/)agents\.md$"),
+    ("OpenAI Codex", r"(^|/)\.codex/"), ("Gemini", r"(^|/)(gemini\.md$|\.gemini/)"),
+    ("Cursor", r"(^|/)(\.cursorrules$|\.cursorignore$|\.cursor/)"), ("Windsurf", r"(^|/)(\.windsurfrules$|\.windsurf/)"),
+    ("GitHub Copilot", r"(^|/)\.github/(copilot-instructions\.md$|instructions/|prompts/|chatmodes/)"),
+    ("Aider", r"(^|/)\.aider[^/]*$"), ("Cline", r"(^|/)\.clinerules"), ("Roo Code", r"(^|/)(\.roo/|\.roomodes$)"),
+    ("Continue", r"(^|/)\.continue/"), ("JetBrains Junie", r"(^|/)\.junie/"), ("Kiro", r"(^|/)\.kiro/"),
+    ("Amazon Q", r"(^|/)\.amazonq/"), ("Augment", r"(^|/)\.augment"), ("Tabnine", r"(^|/)\.tabnine"),
+    ("Codeium", r"(^|/)\.codeium/"),
+]
+AI_TOOL_FILES = [(name, re.compile(pattern)) for name, pattern in AI_TOOL_FILES]
+DOCUMENT_TEXT_EXTS = {".md", ".markdown", ".rst", ".adoc", ".org"}
+DOCUMENT_TEXT_READ = 2 * 1024 * 1024
+# Files the art and audio tools save their work in, as opposed to what they export for the engine.
+SOURCE_ART_EXTS = {
+    ".blend": "Blender", ".ma": "Maya", ".mb": "Maya", ".max": "3ds Max", ".ztl": "ZBrush", ".zpr": "ZBrush",
+    ".c4d": "Cinema 4D", ".hip": "Houdini", ".hipnc": "Houdini", ".hiplc": "Houdini", ".spp": "Substance Painter",
+    ".sbs": "Substance Designer", ".psd": "Photoshop", ".psb": "Photoshop", ".kra": "Krita", ".xcf": "GIMP",
+    ".aseprite": "Aseprite", ".clip": "Clip Studio Paint", ".afphoto": "Affinity", ".afdesign": "Affinity",
+    ".ai": "Illustrator", ".zprj": "Marvelous Designer", ".spine": "Spine", ".fspro": "FMOD Studio",
+    ".wproj": "Wwise", ".rpp": "Reaper", ".als": "Ableton Live", ".flp": "FL Studio", ".ptx": "Pro Tools",
+    ".cpr": "Cubase", ".sesx": "Adobe Audition",
+}
+UNITY_TEST_ASSEMBLY = re.compile(rb"UnityEngine\.TestRunner|nunit\.framework\.dll")
+
+
+class Practices:
+    """Collects, while the folder is walked, how the studio works: automated tests, build
+    automation, settings for AI coding tools, documents, and the art and audio tools' own files."""
+
+    def __init__(self):
+        self.tests = Counter()           # kind -> test definitions in the studio's code
+        self.test_assemblies = 0         # Unity assembly definitions for tests
+        self.ci = Counter()              # CI system -> files
+        self.ai_tools = Counter()        # AI coding tool -> files of its settings
+        self.documents = [0, 0]          # the studio's Markdown and text documents: [files, lines]
+        self.links = set()               # (service, link) to documents kept elsewhere (kept in memory only)
+        self.source_art = {own: Counter() for own in (True, False)}   # tool -> files
+
+    def saw_file(self, own, rel_file, path, ext):
+        rel = rel_file.replace(os.sep, "/").lower()
+        tool = SOURCE_ART_EXTS.get(ext)
+        if tool:
+            self.source_art[own][tool] += 1
+        if not own:
+            return
+        for name, pattern in CI_FILES:
+            if pattern.search(rel):
+                self.ci[name] += 1
+                break
+        for name, pattern in AI_TOOL_FILES:
+            if pattern.search(rel):
+                self.ai_tools[name] += 1
+                break
+        if ext == ".asmdef" and UNITY_TEST_ASSEMBLY.search(read_settings_file(path, 65536)):
+            self.test_assemblies += 1
+        if ext in DOCUMENT_TEXT_EXTS:
+            data = read_settings_file(path, DOCUMENT_TEXT_READ)
+            self.documents[0] += 1
+            self.documents[1] += sum(1 for line in data.splitlines() if line.strip())
+            self.links |= document_links(data)
+
+    def saw_code(self, code):
+        self.tests.update(code["tests"])
+        self.links |= code["documents"]
+
+    def report(self, functional_tests=0, office_documents=0):
+        """(report lines, summary line, facts). functional_tests: Unreal Blueprints that are tests;
+        office_documents: the studio's own PDFs and office documents."""
+        out = ["", "How the studio works (from the files in the folder):"]
+        n = sum(self.tests.values())
+        parts = [f"{plural(n, 'test definition')} in the studio's code ("
+                 + ", ".join(f"{kind} {k:,}" for kind, k in self.tests.most_common()) + ")"] if n else []
+        if self.test_assemblies:
+            parts.append(counted(self.test_assemblies, "Unity test assemblies"))
+        if functional_tests:
+            parts.append(plural(functional_tests, "functional-test Blueprint"))
+        out.append("  Automated tests: " + ("; ".join(parts) if parts else
+                                            "none found in the studio's code (no test definitions this script recognises)"))
+        out.append("  Build automation (CI) settings: " + (", ".join(f"{name} ({plural(k, 'file')})" for name, k in
+                                                                  self.ci.most_common()) or "none found"))
+        out.append("  Settings for AI coding tools: " + (", ".join(name for name, _ in self.ai_tools.most_common())
+                                                         or "none found"))
+        links = Counter(service for service, _ in self.links)
+        out.append(f"  Documents: {plural(self.documents[0], 'Markdown or text document')} ({plural(self.documents[1], 'line')})"
+                   f" and {plural(office_documents, 'PDF or office document')} of the studio's own"
+                   + ("; links to documents kept elsewhere: " + ", ".join(f"{s} {k:,}" for s, k in links.most_common())
+                      if links else ""))
+        own_art, their_art = self.source_art[True], self.source_art[False]
+        if own_art or their_art:
+            out.append("  Art and audio tools' own files (the sources the game's assets were exported from; are they part"
+                       " of the delivery?):")
+            out.append("    " + (", ".join(f"{tool} {k:,}" for tool, k in own_art.most_common()) or "none of the studio's own")
+                       + (f"  (plus someone else's: " + ", ".join(f"{tool} {k:,}" for tool, k in their_art.most_common())
+                          + ")" if their_art else ""))
+        else:
+            out.append("  Art and audio tools' own files: none found (no .blend, .ma, .psd, .spp, FMOD or Wwise projects ...)")
+        tests_found = n + self.test_assemblies + functional_tests
+        summary = f"  Automated tests: {plural(n + functional_tests, 'test definition') if tests_found else 'none found'}"
+        facts = {"test_definitions": dict(self.tests), "unity_test_assemblies": self.test_assemblies,
+                 "functional_test_blueprints": functional_tests, "ci": dict(self.ci), "ai_tool_settings": sorted(self.ai_tools),
+                 "documents": {"text_files": self.documents[0], "text_lines": self.documents[1],
+                               "office_files": office_documents, "links_elsewhere": dict(links)},
+                 "source_art_files": {"own": dict(own_art), "someone_elses": dict(their_art)}}
+        return out, summary, facts
 
 
 # #######################################
@@ -6140,8 +7086,7 @@ def folder_breakdown(lines_by_dir):
 # Standard measures: the numbers buyers' codebase forms ask for, as the tools those forms name
 # define them. scc counts logical lines (not blank, not only a comment) and, with --gen, generated
 # code; jscpd measures duplication (code copied and pasted, at least 5 lines and 50 tokens long).
-# Both are run the way the forms ask, over the studio's own code. Where one can't be run, its
-# figures are left out of the report, which says why: this script doesn't estimate them.
+# This script counts both itself, as those tools do, over the studio's own code.
 
 # ##############################
 # Primary language
@@ -6152,6 +7097,8 @@ FORM_LANGUAGES = {"C#", "C", "C++", "CSS", "Go", "HTML", "Java", "JavaScript", "
                   "Delphi", "Erlang", "Fortran", "JCL", "LabVIEW", "MUMPS", "OCaml", "Object Pascal", "PL/I", "Perl",
                   "Progress ABL", "RPG", "Smalltalk", "Tcl", "VHDL", "Verilog", "Visual Basic 6"}
 FORM_LANGUAGE_NAMES = {"UnityScript": "JavaScript", "T-SQL": "SQL", "PL/SQL": "SQL", "Pascal": "Object Pascal",
+                       "Delphi project": "Object Pascal", "C++ template implementation": "C++",
+                       "Visual Basic 6 form": "Visual Basic 6", "Visual Basic for Applications": "VBA",
                        # scc's names
                        "C Header": "C header", "C++ Header": "C++", "BASH": "Shell", "Zsh": "Shell", "Korn Shell": "Shell",
                        "C Shell": "Shell", "Fish": "Shell", "FORTRAN Legacy": "Fortran", "Fortran Modern": "Fortran",
@@ -6190,239 +7137,966 @@ def primary_language(lines_by_language):
 
 
 # ##############################
-# scc and jscpd
+# Logical lines and duplication, counted here
 # ##############################
+# Buyers' forms ask for scc's logical lines (scc -x csv; generated ones with --gen and the markers
+# below) and jscpd's duplication ratio (--min-tokens 50 --min-lines 5). This script counts them
+# itself, in the same way, so that it needs no other program and downloads nothing: lines by
+# language as scc 4.1.0 classifies them (code, comment, blank), and copies of code as jscpd 5.4.1
+# finds them (runs of at least 50 tokens and 5 lines found again elsewhere in files of the same
+# language). Both are counted over the studio's own files only, leaving out what .gitignore and
+# .ignore files ignore, as the tools do. See HOW_IT_WORKS.md, section 12, for how close they come.
 
 # ####################
-# Their options
+# Languages
 # ####################
-SCC_ARGS = ["-x", "csv"]
-SCC_GENERATED_ARGS = ["--gen", "--generated-markers", "do not edit,<auto-generated />,<auto-generated>",
-                      "--exclude-dir", "vendor,node_modules,dist,build,generated,migrations,Migrations"]
-JSCPD_ARGS = ["--min-tokens", "50", "--min-lines", "5", "--reporters", "json"]
-JSCPD_IGNORE = ["**/*.csv"]   # forms' --ignore; given in a config file, beside what isn't the studio's
+# scc 4.1.0's languages, as it reads them: (name, extensions and file names, line comments, block
+# comments, quotes, flags). Taken from scc by running it on files written to show each one: which
+# comments it counts as comments, whether they nest, which quotes keep a comment's start from
+# counting, and whether a string runs on to the next line (then a line in it is code, even a blank
+# one or one that starts like a comment). Quotes are None where scc reads no strings that matter.
+# Flags: n block comments nest; m a string runs on to the next line; x no backslash escapes.
+SCC_LANGUAGES = [
+    ('ABAP', 'abap', ('*',), (), None, ''),
+    ('ABNF', 'abnf', (';',), (), None, ''),
+    ('ActionScript', 'as', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Ada', 'ada adb ads pad', ('--',), (), None, ''),
+    ('Agda', 'agda', ('--',), (('{-', '-}'),), '', 'nx'),
+    ('AL', 'al', ('//',), (('/*', '*/'),), "'", 'x'),
+    ('Alchemist', 'crn', ('#',), (), None, ''),
+    ('Alex', 'x', (), (), None, ''),
+    ('Algol 68', 'a68', ('-#', '{#'), (('#|', '|#'), ('#[', ']#'), ('#=', '=#'), ('###', '###'), ('<%#', '%>'), ('<#--', '-->'), ('#{', '}#')), '"', 'mx'),
+    ('Alloy', 'als', ('--', '//'), (('/*', '*/'),), '', 'x'),
+    ('Amber', 'ab', ('//',), (), '"', 'm'),
+    ('Android Interface Definition Language', 'aidl', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Apex', 'apex trigger', ('//',), (('/*', '*/'),), "'", 'x'),
+    ('APL', 'apl aplf apln aplc dyalog', ('⍝',), (), "'", 'm'),
+    ('AppleScript', 'applescript', ('#', '--'), (('(*', '*)'),), '"', 'm'),
+    ('ArkTs', 'ets', ('//',), (('/*', '*/'),), '"\'`', 'm'),
+    ('Arturo', 'art', (';',), (), '"\'', 'm'),
+    ('AsciiDoc', 'adoc', (), (), None, ''),
+    ('ASP', 'asa asp', ("'", 'REM ', 'rem '), (), None, ''),
+    ('ASP.NET', 'asax ascx asmx aspx master sitemap webinfo', (), (('<!--', '-->'), ('<%--', '--%>')), '', 'x'),
+    ('Assembly', 's asm', ('//*', ';'), (('/*', '*/'),), '"\'', 'm'),
+    ('Astro', 'astro', ('//',), (('/*', '*/'), ('<!--', '-->')), '"', 'm'),
+    ('ATS', 'dats sats ats hats', ('//',), (('/*', '*/'), ('(*', '*)')), '"', 'm'),
+    ('Autoconf', 'in', ('#', 'dnl '), (), None, ''),
+    ('AutoHotKey', 'ahk', ('//*', ';'), (('/*', '*/'),), '', 'x'),
+    ('Avro', 'avdl avpr avsc', (), (), None, ''),
+    ('AWK', 'awk', ('#',), (), '"', 'm'),
+    ('bait', 'bt', ('//',), (('/*', '*/'),), '"\'`', 'nm'),
+    ('BASH', 'bash bash_login bash_logout bash_profile bashrc .bash_login .bash_logout .bash_profile .bashrc', ('#',), (), '"\'', 'm'),
+    ('Basic', 'bas', ("'",), (), '"', 'm'),
+    ('Batch', 'bat btm cmd', ('::', 'REM ', 'rem '), (), None, ''),
+    ('Bazel', 'bzl build.bazel build workspace', ('#',), (), '"', 'm'),
+    ('Bean', 'bean beancount', (';',), (), '"', 'm'),
+    ('Bicep', 'bicep', ('//',), (('/*', '*/'),), "'", 'x'),
+    ('Bitbake', 'bb bbappend bbclass', ('#',), (), '"', 'm'),
+    ('Bitbucket Pipeline', 'bitbucket-pipelines.yml', ('#',), (), None, ''),
+    ('Blade template', 'blade.php', (), (('<!--', '-->'),), '', 'x'),
+    ('Blueprint', 'blp', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Boo', 'boo', ('//',), (('/*', '*/'),), '"\'', 'm'),
+    ('Bosque', 'bsq', ('//',), (), '"\'', 'm'),
+    ('Brainfuck', 'bf', (), (), None, ''),
+    ('Bru', 'bru', (), (), '"', 'm'),
+    ('BuildStream', 'bst', ('#',), (), None, ''),
+    ('C', 'c ec pgc', ('//',), (('/*', '*/'),), '"', ''),
+    ('C Header', 'h', ('//',), (('/*', '*/'),), '"', ''),
+    ('C Shell', 'csh .cshrc', ('#',), (), None, ''),
+    ('C#', 'cs csx', ('//',), (('/*', '*/'),), '"\'', 'm'),
+    ('C++', 'cc cpp cxx c++ pcc ino ccm cppm cxxm c++m mxx', ('//',), (('/*', '*/'),), '"', ''),
+    ('C++ Header', 'h hh hpp hxx h++ inl ipp ixx tpp', ('//',), (('/*', '*/'),), '"', ''),
+    ('C3', 'c3', ('//',), (('/*', '*/'),), '"`', 'm'),
+    ('Cabal', 'cabal', ('--',), (('{-', '-}'),), '', 'x'),
+    ('Cairo', 'cairo', ('//',), (), "'", 'm'),
+    ('Cangjie', 'cj', ('//',), (('/*', '*/'),), '"\'', 'm'),
+    ("Cap'n Proto", 'capnp', ('#',), (), None, ''),
+    ('Cassius', 'cassius', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Ceylon', 'ceylon', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Chapel', 'chpl', ('//',), (('/*', '*/'),), '"\'', 'm'),
+    ('Circom', 'circom', ('//',), (('/*', '*/'),), '', 'x'),
+    ('Clipper', 'prg ch', ('//',), (('/*', '*/'),), '"\'', 'm'),
+    ('Clojure', 'clj cljc', (';',), (), None, ''),
+    ('ClojureScript', 'cljs', (';',), (), None, ''),
+    ('Closure Template', 'soy', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('CloudFormation (JSON)', 'json', (), (), None, ''),
+    ('CloudFormation (YAML)', 'yaml yml', (), (), None, ''),
+    ('CMake', 'cmake cmakelists.txt', ('#',), (('#[[', ']]'),), '"', 'm'),
+    ('COBOL', 'cob cbl ccp cobol cpy', ('*',), (), None, ''),
+    ('CodeQL', 'ql qll', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('CoffeeScript', 'coffee', ('#',), (('###', '###'),), '"\'', 'm'),
+    ('Cogent', 'cogent', ('--',), (), None, ''),
+    ('ColdFusion', 'cfm', (), (), '"\'', 'm'),
+    ('ColdFusion CFScript', 'cfc', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Coq', 'v', (), (('(*', '*)'),), '"', 'nm'),
+    ('Creole', 'creole', (), (), None, ''),
+    ('Crystal', 'cr', ('#',), (), '"\'', 'm'),
+    ('CSS', 'css', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('CSV', 'csv', (), (), None, ''),
+    ('Cuda', 'cu cuh', ('//',), (('/*', '*/'),), '"', ''),
+    ('Cypher', 'cypher cql', ('//',), (('/*', '*/'),), '"\'', 'm'),
+    ('Cython', 'pyx pxi pxd', ('#',), (), '"\'', 'm'),
+    ('D', 'd', ('//',), (('/*', '*/'), ('/+', '+/')), '"\'', 'nm'),
+    ('D2', 'd2', ('#',), (), None, ''),
+    ('DAML', 'daml', ('--',), (('{-', '-}'),), '', 'x'),
+    ('Dart', 'dart', ('//',), (('/*', '*/'),), '"', 'nm'),
+    ('Device Tree', 'dts dtsi', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Dhall', 'dhall', ('--',), (('{-', '-}'),), '"', 'm'),
+    ('DM', 'dm', ('//',), (('/*', '*/'),), '"\'', 'nm'),
+    ('Docker ignore', '.dockerignore', ('#', '//'), (), None, ''),
+    ('Dockerfile', 'dockerfile dockerfile', ('#',), (), '"\'', 'm'),
+    ('Document Type Definition', 'dtd', (), (), None, ''),
+    ('DOT', 'dot gv', ('#', '//'), (('/*', '*/'),), '', 'x'),
+    ('Elixir', 'ex exs', ('#',), (), '"\'', 'm'),
+    ('Elixir Template', 'eex', ('#',), (('<!--', '-->'),), '"\'', 'm'),
+    ('Elm', 'elm', ('--',), (('{-', '-}'),), '"', 'nm'),
+    ('Emacs Dev Env', 'ede', (';',), (), None, ''),
+    ('Emacs Lisp', 'el', (';',), (), None, ''),
+    ('EmiT', 'emit', ('//',), (), '"', 'm'),
+    ('Erlang', 'erl hrl', ('%',), (), None, ''),
+    ('Expect', 'exp', ('#',), (), '"\'', 'm'),
+    ('Extensible Stylesheet Language Transformations', 'xslt xsl', (), (), None, ''),
+    ('F#', 'fs fsi fsx fsscript', ('//',), (('(*', '*)'),), '"', 'nm'),
+    ('F*', 'fst', (), (('(*', '*)'),), '"', 'm'),
+    ('Factor', 'factor', ('!', '//*'), (('/*', '*/'),), '"', 'm'),
+    ('Fennel', 'fnl', (';',), (), '"', 'm'),
+    ('FIDL', 'fidl', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Fish', 'fish', ('#',), (), '"\'', 'm'),
+    ('Flow9', 'flow', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Forth', '4th forth fr frt fth f83 fb fpm e4 rx ft', ('\\ ',), (), None, ''),
+    ('FORTRAN Legacy', 'f for ftn f77 pfo', ('!', '*', 'C', 'c'), (), '"\'', 'm'),
+    ('Fortran Modern', 'f03 f08 f90 f95', ('!',), (), '"', 'm'),
+    ('Fragment Shader File', 'fsh', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Freemarker Template', 'ftl', (), (('<#--', '-->'),), '', 'x'),
+    ('FSL', 'fsl', ('//',), (), None, ''),
+    ('Futhark', 'fut', ('--',), (), None, ''),
+    ('FXML', 'fxml', (), (('<!--', '-->'),), '"', 'm'),
+    ('Game Maker Language', 'gml', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Game Maker Project', 'yyp', (), (), None, ''),
+    ('GDScript', 'gd', ('#',), (), '"\'', 'm'),
+    ('Gemfile', 'gemfile', ('#',), (), '"\'', 'm'),
+    ('Gherkin Specification', 'feature', ('#',), (), None, ''),
+    ('gitignore', '.gitignore', ('#',), (), None, ''),
+    ('Gleam', 'gleam', ('//',), (), '"', 'm'),
+    ('GLSL', 'vert tesc tese geom frag comp glsl', ('//',), (('/*', '*/'),), '"', ''),
+    ('GN', 'gn gni', ('#',), (), '"', 'm'),
+    ('Go', 'go', ('//',), (('/*', '*/'),), '"\'`', 'm'),
+    ('Go Template', 'tmpl gohtml gotxt', (), (('{{/*', '*/}}'),), '', 'x'),
+    ('Go+', 'gop', ('#', '//'), (('/*', '*/'),), '"`', 'm'),
+    ('Godot Scene', 'tscn', (), (), None, ''),
+    ('Gradle', 'gradle', ('//',), (('/*', '*/'),), '"\'', 'm'),
+    ('GraphQL', 'graphql', ('#',), (('"""', '"""'),), '"\'`', 'm'),
+    ('Gremlin', 'gremlin', ('//',), (), '"\'', 'm'),
+    ('Groovy', 'groovy grt gtpl gvy', ('//',), (('/*', '*/'),), '"\'', 'm'),
+    ('Gwion', 'gw', ('#!',), (), '"', 'm'),
+    ('HAML', 'haml', ('-#',), (), None, ''),
+    ('Hamlet', 'hamlet', (), (('<!--', '-->'),), '"', 'm'),
+    ('Handlebars', 'hbs handlebars', (), (('<!--', '-->'), ('{{!--', '--}}'), ('{{!', '}}')), '"', 'm'),
+    ('Happy', 'y ly', (), (), None, ''),
+    ('Hare', 'ha', ('//',), (), '"`', 'm'),
+    ('Haskell', 'hs', ('--',), (('{-', '-}'),), '', 'nx'),
+    ('Haxe', 'hx', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('HCL', 'hcl', ('#', '//*'), (('/*', '*/'),), '"', 'm'),
+    ('HEEx', 'heex leex', (), (('<!--', '-->'),), '"', 'm'),
+    ('HEX', 'hex', (), (), None, ''),
+    ('hoon', 'hoon', ('::',), (), '"\'', 'm'),
+    ('HTML', 'html htm', (), (('<!--', '-->'),), '"', 'm'),
+    ('IDL', 'idl webidl widl', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Idris', 'idr lidr', ('--',), (('{-', '-}'),), '"', 'nm'),
+    ('IEC61131-3', 'scl s7dcl', ('//',), (('/*', '*/'), ('(*', '*)')), '"\'', 'm'),
+    ('ignore', '.ignore', ('#',), (), None, ''),
+    ('INI', 'ini', ('#', ';'), (), None, ''),
+    ('Intel HEX', 'ihex', (), (), None, ''),
+    ('Isabelle', 'thy', ('--',), (('(*', '*)'), ('{*', '*}')), '', 'x'),
+    ('Jade', 'jade', (), (), None, ''),
+    ('JAI', 'jai', ('//',), (('/*', '*/'),), '"', 'nm'),
+    ('Janet', 'janet', ('#',), (), '"', 'm'),
+    ('Java', 'java', ('//',), (('/*', '*/'),), '"\'', 'm'),
+    ('JavaScript', 'js cjs mjs', ('//',), (('/*', '*/'),), '"\'`', 'm'),
+    ('JavaServer Pages', 'jsp', ('//',), (('/*', '*/'),), '"\'', 'm'),
+    ('JCL', 'jcl jcls', ('//*',), (), "'", 'm'),
+    ('Jenkins Buildfile', 'jenkinsfile', ('//',), (('/*', '*/'),), '"\'', 'm'),
+    ('Jinja', 'jinja j2 jinja2', (), (('{#', '#}'),), '', 'x'),
+    ('jq', 'jq', ('#',), (), '"', 'm'),
+    ('JSON', 'json', (), (), None, ''),
+    ('JSON5', 'json5', ('//',), (), None, ''),
+    ('JSONC', 'jsonc', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('JSONL', 'jsonl', (), (), None, ''),
+    ('Jsonnet', 'jsonnet libsonnet', ('#', '//'), (('/*', '*/'),), '"\'', 'm'),
+    ('JSX', 'jsx', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Julia', 'jl', ('#',), (('#=', '=#'),), '"', 'nm'),
+    ('Julius', 'julius', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Jupyter', 'ipynb jpynb', (), (), None, ''),
+    ('Just', 'justfile', ('#',), (), None, ''),
+    ('K', 'k', ('/',), (), '"', 'm'),
+    ('Korn Shell', 'ksh .kshrc', ('#',), (), '"\'', 'm'),
+    ('Kotlin', 'kt kts', ('//',), (('/*', '*/'),), '"', 'nm'),
+    ('Koto', 'koto', ('#',), (('<#--', '-->'),), '"\'', 'nm'),
+    ('LALRPOP', 'lalrpop', ('//',), (('/*', '*/'),), '"', 'nm'),
+    ('LaTeX', 'tex', ('%',), (), None, ''),
+    ('LD Script', 'lds', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Lean', 'lean hlean', ('--',), (), None, ''),
+    ('LESS', 'less', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('LEX', 'l', ('//*',), (('/*', '*/'),), '', 'x'),
+    ('License', 'license licence copying copying3 unlicense unlicence license-apache licence-apache license-mit licence-mit copyright', (), (), None, ''),
+    ('Lisp', 'lisp lsp', (';',), (('#|', '|#'),), '', 'nx'),
+    ('LiveScript', 'ls', ('#', '//*'), (('/*', '*/'),), '"\'', 'm'),
+    ('LLVM IR', 'll', (';',), (), '"', 'm'),
+    ('LOLCODE', 'lol lols', (), (), '"', 'm'),
+    ('Lua', 'lua', ('--',), (('--[[', ']]'), ('--[=[', ']=]'), ('--[==[', ']==]')), '"\'', 'm'),
+    ('Luau', 'luau', ('--',), (('--[[', ']]'), ('--[=[', ']=]'), ('--[==[', ']==]')), '"\'`', 'm'),
+    ('Lucius', 'lucius', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Luna', 'luna', ('#',), (), '"\'', 'm'),
+    ('m4', 'm4', ('#',), (), None, ''),
+    ('Macromedia eXtensible Markup Language', 'mxml', (), (), None, ''),
+    ('Madlang', 'mad', ('#',), (('{#', '#}'),), '', 'x'),
+    ('Makefile', 'makefile mak mk bp makefile gnumakefile', ('#',), (), None, ''),
+    ('Mako', 'mako mao', (), (('<%doc>', '</%doc>'),), '', 'x'),
+    ('Markdown', 'md markdown', (), (), None, ''),
+    ('MATLAB', 'm', ('%',), (('%{', '%}'),), "'", 'x'),
+    ('Max', 'maxpat', (), (), None, ''),
+    ('MDX', 'mdx', (), (), None, ''),
+    ('Meson', 'meson.build meson_options.txt', ('#',), (), "'", 'm'),
+    ('Metal', 'metal', ('//',), (('/*', '*/'),), '"', ''),
+    ('MLIR', 'mlir', ('//',), (), '"', 'm'),
+    ('Modula3', 'm3 mg ig i3', ('#',), (('(*', '*)'),), '"', 'm'),
+    ('Module-Definition', 'def', (';',), (), None, ''),
+    ('Mog', 'mog', ('//',), (), '"', 'm'),
+    ('Mojo', 'mojo 🔥', ('#',), (('"""', '"""'), ("'''", "'''")), '"\'`', 'm'),
+    ('Monkey C', 'mc', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Moonbit', 'mbt', ('//',), (), '"', 'm'),
+    ('Move', 'move', ('//',), (('/*', '*/'),), '"', 'nm'),
+    ('MQL Header', 'mqh', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('MQL4', 'mq4', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('MQL5', 'mq5', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('MSBuild', 'csproj vbproj fsproj vcproj vcxproj vcxproj.filters ilproj myapp props rdlc resx settings sln targets', (), (('<!--', '-->'),), '"', 'm'),
+    ('MUMPS', 'mps', (';',), (), '"', 'm'),
+    ('Mustache', 'mustache', (), (('{{!--', '--}}'), ('{{!', '}}')), '"', 'm'),
+    ('Nature', 'n', ('//',), (('/*', '*/'),), '"\'`', 'm'),
+    ('Nial', 'ndf', ('%',), (), "'", 'm'),
+    ('Nim', 'nim', ('#',), (), '"', 'm'),
+    ('Nix', 'nix', ('#', '//*'), (('/*', '*/'),), '"', 'm'),
+    ('Nushell', 'nu', ('#',), (), '"\'', 'm'),
+    ('nuspec', 'nuspec', (), (('<!--', '-->'),), '"', 'm'),
+    ('Objective C', 'm h', ('//',), (('/*', '*/'),), '"', ''),
+    ('Objective C++', 'mm', ('//',), (('/*', '*/'),), '"', ''),
+    ('OCaml', 'ml mli', (), (('(*', '*)'),), '"', 'nm'),
+    ('Odin', 'odin', ('//',), (('/*', '*/'),), '"', 'nm'),
+    ('Opalang', 'opa', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('OpenQASM', 'qasm', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('OpenTofu', 'tofu', ('#', '//'), (('/*', '*/'),), '', 'x'),
+    ('Org', 'org', (), (), None, ''),
+    ('Oz', 'oz', ('%', '//*'), (('/*', '*/'),), '"', 'm'),
+    ('Pascal', 'pas', ('//',), (('{-', '-}'), ('(*', '*)'), ('{', '}'), ('{#', '#}'), ('{*', '*}'), ('{|', '|}')), "'", 'x'),
+    ('Patch', 'patch diff', (), (), None, ''),
+    ('Perl', 'pl plx pm', ('#',), (('=pod', '=cut'),), '"\'', 'm'),
+    ('PHP', 'php', ('#', '//'), (('/*', '*/'),), '"\'', 'm'),
+    ('Picat', 'pi', ('%', '//*'), (('/*', '*/'),), '"', 'm'),
+    ('PKGBUILD', 'pkgbuild', ('#',), (), None, ''),
+    ('Pkl', 'pkl', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('PL/SQL', 'fnc pkb pks prc trg vw', ('--', '//*'), (('/*', '*/'),), "'", 'x'),
+    ('Plain Text', 'text txt', (), (), None, ''),
+    ('Polly', 'polly', (), (('<!--', '-->'),), '"', 'm'),
+    ('POML', 'poml', (), (('<!--', '-->'),), '"', 'm'),
+    ('Pony', 'pony', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('PostScript', 'ps', ('%',), (), None, ''),
+    ('Powershell', 'ps1 psm1', ('#',), (('<#', '#>'),), '"', 'mx'),
+    ('Processing', 'pde', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Prolog', 'p pro', ('%', '//*'), (('/*', '*/'),), '"', 'm'),
+    ('Properties File', 'properties', ('#',), (), None, ''),
+    ('Protocol Buffers', 'proto', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('PRQL', 'prql', ('#',), (('"""', '"""'), ("'''", "'''")), '"\'`', 'm'),
+    ('PSL Assertion', 'psl', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Puppet', 'pp', ('#',), (('=begin', '=end'),), '"\'', 'm'),
+    ('PureScript', 'purs', ('--',), (('{-', '-}'),), '', 'nx'),
+    ('Python', 'py pyw pyi', ('#',), (('"""', '"""'), ("'''", "'''")), '"\'`', 'm'),
+    ('Q#', 'qs', ('//',), (), '"', 'm'),
+    ('QCL', 'qcl', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('QML', 'qml', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Qt Translation Source', 'ts', (), (('<!--', '-->'),), '', 'x'),
+    ('R', 'r', ('#',), (), None, ''),
+    ('Racket', 'rkt', (';',), (('#|', '|#'),), '"', 'nm'),
+    ('Rakefile', 'rake rakefile', ('#',), (('=begin', '=end'),), '"\'', 'm'),
+    ('Raku', 'raku rakumod rakutest rakudoc t', ('#',), (('=begin', '=end'),), '"\'', 'm'),
+    ('RAML', 'raml rml', ('#',), (), None, ''),
+    ('Razor', 'cshtml razor', (), (('<!--', '-->'), ('@*', '*@')), '', 'x'),
+    ('ReasonML', 're rei', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Rebol', 'reb', (';',), (('{-', '-}'), ('{', '}'), ('{#', '#}'), ('{*', '*}'), ('{|', '|}')), '"', 'm'),
+    ('Redscript', 'reds', ('//',), (('/*', '*/'),), '"', 'nm'),
+    ('Report Definition Language', 'rdl', (), (('<!--', '-->'),), '"', 'm'),
+    ('ReScript', 'res resi', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('ReStructuredText', 'rst', (), (), None, ''),
+    ('Rich Text Format', 'rtf', (), (), None, ''),
+    ('Robot Framework', 'robot', (), (), None, ''),
+    ('Ruby', 'rb', ('#',), (('=begin', '=end'),), '"\'', 'm'),
+    ('Ruby HTML', 'rhtml erb', (), (('<!--', '-->'),), '"', 'm'),
+    ('Rust', 'rs', ('//',), (('/*', '*/'),), '"', 'nm'),
+    ('SAS', 'sas', ('*', '//*'), (('/*', '*/'),), '"\'', 'm'),
+    ('Sass', 'sass scss', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Scala', 'sc scala', ('//',), (('/*', '*/'),), '"', 'nm'),
+    ('Scallop', 'scl', (), (), None, ''),
+    ('Scheme', 'scm ss', (';',), (('#|', '|#'),), '', 'nx'),
+    ('Scons', 'csig sconstruct sconscript', ('#',), (), '"\'', 'm'),
+    ('sed', 'sed', ('#',), (), None, ''),
+    ('Seed7', 'sd7 s7i', ('#',), (('(*', '*)'),), '"', 'm'),
+    ('Shell', 'sh .tcshrc', ('#',), (), '"\'', 'm'),
+    ('Sieve', 'sieve', ('#', '//*'), (('/*', '*/'),), '"', 'm'),
+    ('SKILL', 'il', ('//*', ';'), (('/*', '*/'),), '"', 'm'),
+    ('Slang', 'slang', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Slint', 'slint', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Smalltalk', 'cs.st pck.st', (), (('"""', '"""'),), "'", ''),
+    ('Smarty Template', 'tpl', (), (('{*', '*}'),), '', 'x'),
+    ('Snakemake', 'smk rules snakefile', ('#',), (('"""', '"""'), ("'''", "'''")), '"\'`', 'm'),
+    ('SNOBOL', 'sno', ('*',), (), '"\'', 'm'),
+    ('Softbridge Basic', 'sbl', ("'",), (), '"', 'm'),
+    ('Solidity', 'sol', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('SPDX', 'spdx', (), (), None, ''),
+    ('Specman e', 'e', ('--', '//'), (), None, ''),
+    ('Spice Netlist', 'ckt', ('*',), (), None, ''),
+    ('SPL', 'spl', (), (), '"', 'm'),
+    ('SQL', 'sql dml ddl dql', ('--', '//*'), (('/*', '*/'),), "'", 'x'),
+    ('SRecode Template', 'srt', (';;',), (), None, ''),
+    ('Stan', 'stan', ('#', '//'), (('/*', '*/'),), '"', 'm'),
+    ('Standard ML (SML)', 'sml', (), (('(*', '*)'),), '"', 'm'),
+    ('Stata', 'do ado', ('*', '//'), (('/*', '*/'),), '"', 'm'),
+    ('Stylus', 'styl', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Svelte', 'svelte', ('//',), (('/*', '*/'), ('<!--', '-->')), '"', 'm'),
+    ('SVG', 'svg', (), (('<!--', '-->'),), '"', 'm'),
+    ('Swift', 'swift', ('//',), (('/*', '*/'),), '"', 'nm'),
+    ('Swig', 'i', ('//*',), (('/*', '*/'),), '"', 'm'),
+    ('Systemd', 'automount device link mount path scope service slice socket swap target timer', ('#',), (), None, ''),
+    ('SystemVerilog', 'sv svh', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Tact', 'tact', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('TaskPaper', 'taskpaper', (), (), None, ''),
+    ('TCL', 'tcl', ('#',), (), '"\'', 'm'),
+    ('Teal', 'teal', ('//',), (), None, ''),
+    ('Templ', 'templ', ('//',), (('/*', '*/'),), '"`', 'm'),
+    ('TemplateToolkit', 'tt tt2', (), (), None, ''),
+    ('Tera', 'tera', (), (('<!--', '-->'), ('{#', '#}')), '', 'x'),
+    ('Terraform', 'tf tfvars tf.json', ('#', '//'), (('/*', '*/'),), '"', 'm'),
+    ('TeX', 'tex sty', ('%',), (), None, ''),
+    ('Textile', 'textile', (), (), None, ''),
+    ('Thrift', 'thrift', ('#', '//'), (('/*', '*/'),), '"\'', 'm'),
+    ('TL', 'tl', ('//',), (('/*', '*/'),), '', 'x'),
+    ('TOML', 'toml', ('#',), (), '"\'', 'm'),
+    ('TOON', 'toon', (), (), '"', 'm'),
+    ('Treetop', 'treetop tt', ('#',), (), '"\'', 'm'),
+    ('TTCN-3', 'ttcn ttcn3 ttcnpp', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Twig Template', 'twig', (), (), None, ''),
+    ('TypeScript', 'ts tsx cts mts', ('//',), (('/*', '*/'),), '"\'`', 'm'),
+    ('TypeScript Typings', 'd.ts', ('//',), (('/*', '*/'),), '"\'`', 'm'),
+    ('TypeSpec', 'tsp', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Typst', 'typ', ('//',), (('/*', '*/'),), '"', 'nm'),
+    ('Unreal Script', 'uc uci upkg', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Up', 'up', ('//',), (), '"`', 'm'),
+    ('Ur/Web', 'ur urs', (), (('(*', '*)'),), '"', 'm'),
+    ('Ur/Web Project', 'urp', ('#',), (), None, ''),
+    ('V', 'v', ('//',), (), None, ''),
+    ('Vala', 'vala', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Varnish Configuration', 'vcl', ('#', '//'), (('/*', '*/'),), '', 'x'),
+    ('Verilog', 'vg vh v', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Verilog Args File', 'irunargs xrunargs', (), (), None, ''),
+    ('Vertex Shader File', 'vsh', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('VHDL', 'vhd vhdl', ('--',), (), None, ''),
+    ('Vim Script', 'vim vimrc gvimrc _vimrc .vimrc _gvimrc .gvimrc vimrc gvimrc', ('"', '#'), (), "'", 'm'),
+    ('Visual Basic', 'vb', ("'",), (), '"', 'm'),
+    ('Visual Basic for Applications', 'cls', ("'",), (), '"', 'm'),
+    ('Vue', 'vue', ('//',), (('/*', '*/'), ('<!--', '-->')), '"', 'm'),
+    ('W.I.S.E. Jobfile', 'fgmj', (), (), None, ''),
+    ('Web Services Description Language', 'wsdl', (), (('<!--', '-->'),), '"', 'm'),
+    ('WebGPU Enhanced Shading Language', 'wesl', ('//',), (('/*', '*/'),), '', 'nx'),
+    ('WebGPU Shading Language', 'wgsl', ('//',), (('/*', '*/'),), '', 'nx'),
+    ('wenyan', 'wy', (), (), None, ''),
+    ('Windows Resource-Definition Script', 'rc', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Wolfram', 'nb wl', (), (('(*', '*)'),), '"', 'm'),
+    ('Wren', 'wren', ('//',), (('/*', '*/'),), '"', 'nm'),
+    ('XAML', 'xaml', (), (('<!--', '-->'),), '"', 'm'),
+    ('Xcode Config', 'xcconfig', ('//',), (), None, ''),
+    ('XHTML', 'xhtml xhtm xht', (), (('<!--', '-->'),), '"', 'm'),
+    ('XMake', 'xmake.lua xpack.lua', ('--',), (('--[[', ']]'), ('--[=[', ']=]'), ('--[==[', ']==]')), '"', 'm'),
+    ('XML', 'xml', (), (('<!--', '-->'),), '"', 'm'),
+    ('XML Schema', 'xsd', (), (), None, ''),
+    ('Xtend', 'xtend', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('YAML', 'yaml yml', ('#',), (), None, ''),
+    ('Yarn', 'yarn', (), (), None, ''),
+    ('Zen C', 'zc', ('//',), (('/*', '*/'),), '"', 'm'),
+    ('Zig', 'zig', ('//',), (), '"', 'm'),
+    ('ZoKrates', 'zok', ('//',), (('/*', '*/'),), '', 'x'),
+    ('Zsh', 'zsh zshenv zlogin zlogout zprofile zshrc .zshenv .zlogin .zlogout .zprofile .zshrc', ('#',), (), '"\'', 'm'),
+]
+# Code this script counts that scc 4.1.0 doesn't recognise (it skips such files), in the same
+# form. Counted here too, and reported apart, as a buyer running scc wouldn't count them.
+MORE_LANGUAGES = [
+    ("Ren'Py", "rpy rpym", ("#",), (('"""', '"""'), ("'''", "'''")), "\"'`", "m"),
+    ("Verse", "verse", ("#",), (("<#", "#>"),), '"', "n"),
+    ("Ink", "ink", ("//",), (("/*", "*/"),), '"', ""),
+    ("SkookumScript", "sk", ("//",), (("/*", "*/"),), '"', "n"),
+    ("Squirrel", "nut", ("//", "#"), (("/*", "*/"),), "\"'", ""),
+    ("AppGameKit", "agc", ("//", "rem "), (("/*", "*/"), ("remstart", "remend")), '"', ""),
+    ("PL/I", "pl1 pli", (), (("/*", "*/"),), "\"'", ""),
+    ("HLSL", "hlsl fx fxh compute", ("//",), (("/*", "*/"),), '"', ""),
+    ("Cg", "cg cginc", ("//",), (("/*", "*/"),), '"', ""),
+    ("ShaderLab", "shader", ("//",), (("/*", "*/"),), '"', ""),
+    ("Unreal Shader", "usf ush", ("//",), (("/*", "*/"),), '"', ""),
+    ("Godot Shader", "gdshader gdshaderinc", ("//",), (("/*", "*/"),), '"', ""),
+    ("GLSL include", "glslinc", ("//",), (("/*", "*/"),), '"', ""),
+    ("Pixel Shader File", "psh", ("//",), (("/*", "*/"),), '"', ""),
+    ("C++ template implementation", "tcc", ("//",), (("/*", "*/"),), '"', ""),
+    ("MoonScript", "moon", ("--",), (), None, ""),
+    ("Delphi project", "dpr", ("//",), (("{", "}"), ("(*", "*)")), "'", "x"),
+    ("T-SQL", "tsql", ("--",), (("/*", "*/"),), "'", "x"),
+    ("Naninovel", "nani", (";",), (), None, ""),
+    ("BlitzMax", "bmx", ("'",), (("Rem", "End Rem"),), None, ""),
+    ("Monkey", "monkey monkey2", ("'",), (("#Rem", "#End"),), None, ""),
+    ("VBScript", "vbs", ("'", "REM ", "rem "), (), None, ""),
+    ("RPG", "rpgle sqlrpgle", ("//",), (), None, ""),
+    ("Twine", "tw twee", (), (("/*", "*/"), ("<!--", "-->")), "", ""),
+    ("Visual Basic 6 form", "frm ctl dsr pag dob", ("'", "REM ", "rem "), (), None, ""),
+]
 
 
-# ####################
-# Fetching them
-# ####################
-# scc and jscpd, the tools buyers' forms name, at pinned versions: fetched once from their official
-# releases (GitHub for scc; npmjs.org for jscpd, published there as a self-contained program, so
-# Node.js isn't needed), over HTTPS with the certificate checked. The download is checked against
-# its SHA-256 checksum below, and so is the program taken out of it, before it's kept, and again
-# before every run. Nothing is sent anywhere. They're kept in tools_folder(); deleting it removes
-# them. No other copy of scc or jscpd (one installed on this computer, say) is ever run.
-SCC_URL = "https://github.com/boyter/scc/releases/download/v4.1.0/scc_"
-JSCPD_URL = "https://registry.npmjs.org/jscpd-{0}/-/jscpd-{0}-5.4.1.tgz"
-PINNED_TOOLS = {   # tool: (version, the program's place in the download,
-    #                       {(system, cpu[, C library]): (url, the download's sha256, the program's sha256)})
-    "scc": ("4.1.0", "", {
-        ("Darwin", "arm64"): (SCC_URL + "Darwin_arm64.tar.gz",
-                              "7201c7aa4aace058d43308462cba72adb18f6094c08c0741727455976d0a0747",
-                              "84967748ef1cff481867adff389d0ec138542d30508f1b3aa1186e2bf83de9f0"),
-        ("Darwin", "x64"): (SCC_URL + "Darwin_x86_64.tar.gz",
-                            "7f705031228add7e55edded409179a60de6b538d41f153ba2922dee95adda50d",
-                            "181240384c83fa8055d5676e58a96885846aa3b6757dcebb1d55ee60fe952bd8"),
-        ("Linux", "arm64"): (SCC_URL + "Linux_arm64.tar.gz",
-                             "6e0d2a1f8d3540ba7df185477dec40bb7340f1b214bfd303147de5cad2bd7b8b",
-                             "5751b4f79502ec0fa40e2205347c79c19680fe4cbf4dd31f7daef7bcd4475af7"),
-        ("Linux", "x64"): (SCC_URL + "Linux_x86_64.tar.gz",
-                           "c7328436d3027f4357d3d7853f7dc3ac2bbcb4ca08f1adad91a27c593884079b",
-                           "4763d7437218d2d642e2f2a4f7f078e044aa67e0e15b90bab6c70d5fc0ab4022"),
-        ("Linux", "x86"): (SCC_URL + "Linux_i386.tar.gz",
-                           "cddeda90ec848c614c6c390eae8b638f94d88e9450e00bf2ba5f420f83b66de1",
-                           "5c0bce19affaa9ddcce385ad10d74966f133554fe43a4ed0f045d09cde711387"),
-        ("Windows", "arm64"): (SCC_URL + "Windows_arm64.zip",
-                               "fdc1188bec07ab46fd391686c404abcd0bed92fffb5f1bb03aa9050dd7bc7f15",
-                               "f001ba25f8121b30eef0f6d51eb35c44fbfb922ceebed4376b326db78ef3bc68"),
-        ("Windows", "x64"): (SCC_URL + "Windows_x86_64.zip",
-                             "4a433984f45ff29c94eeb3af6db5b511c58f5bf74063dccedafcbf473cb8ff31",
-                             "b22c38e5bd888d98cdc3987cd125b0041fa1154ed4ef59238052d156461324e8"),
-        ("Windows", "x86"): (SCC_URL + "Windows_i386.zip",
-                             "7b5b924e85b6fe7f1ba56f15e7e27220a2c0c7089f815368e61f24c6ef317688",
-                             "54bbb39702484f960ae051c5bb6cf927ec1dd2dd17b485a95269df38152abecd"),
-    }),
-    "jscpd": ("5.4.1", "package/bin/", {
-        ("Darwin", "arm64"): (JSCPD_URL.format("darwin-arm64"),
-                              "cafdb84c9345d0790e4a2297789cfeb16ac939442f322c49a54961468c895aff",
-                              "aaa9cd3cef9d1e1e7280e0f4f551b50de533d62f2ec7effb19a99bd6b58d3f7a"),
-        ("Darwin", "x64"): (JSCPD_URL.format("darwin-x64"),
-                            "43dd411716d0a90803d2ad3d3cd74da96523fc31f13f202c6c6e77b0b4841beb",
-                            "da19d3a2de025f52e00550fc2437eb955ccfdc9aa4b3b2c24e7e1e77f86e5c06"),
-        ("Linux", "arm64", "gnu"): (JSCPD_URL.format("linux-arm64-gnu"),
-                                    "74cbf9d3faa5240d2a17f03a6829fb67cc04f7a37059b3a6f57e9d3adb438b94",
-                                    "ea943633332cbf9f14e966f4aa12964a4dfb27e74de7040df0e4303d13afb29f"),
-        ("Linux", "arm64", "musl"): (JSCPD_URL.format("linux-arm64-musl"),
-                                     "e81c41fa6fa70788c8e47f4eff0ee3d5f00dd8b8cf0489ac7f610105798e4847",
-                                     "7227178e87816b8ad54ddb7df084db4c9487ebb34848ead2635b0da162232619"),
-        ("Linux", "x64", "gnu"): (JSCPD_URL.format("linux-x64-gnu"),
-                                  "5cfd74b986e3d9205dd639a84249203595be67f6062ac652f1b78884b1dea439",
-                                  "9656bc09c9a537006735356798c2f4b78299f81e0d57431e7843b88622e74372"),
-        ("Linux", "x64", "musl"): (JSCPD_URL.format("linux-x64-musl"),
-                                   "28f47a136fc81577ecb67db247b4575abd17941a5682bb57caf7ca967911dc73",
-                                   "a2217c30cf91205ccabf7ed42509fcebcac44c2fc1d6c43fe4ef82ecf63c8f7c"),
-        ("Windows", "arm64"): (JSCPD_URL.format("windows-arm64-msvc"),
-                               "4250180ae1129b22ed6d3e3be7c60c18678fae78d36b2cc65c67d04b0406dad9",
-                               "02a68936be7fc3b689318dce55e7120d13e13821375871fd5f5607e91b88bd77"),
-        ("Windows", "x64"): (JSCPD_URL.format("windows-x64-msvc"),
-                             "657b833dbe8c642984d859bafc9557827ea11808bed76fa23bed63fe6d3da3a0",
-                             "d6a514877c1e5c4ac647f4d2f0cb2321b0170d9b5eb088104e809b64020023a9"),
-    }),
+# Files scc's forms command leaves out: -x csv, and scc's own list of lock files (case as scc has it).
+MEASURE_SKIP_EXTS = {".csv"}
+MEASURE_SKIP_FILES = {"package-lock.json", "Cargo.lock", "yarn.lock", "pubspec.lock", "Podfile.lock", "pnpm-lock.yaml",
+                      ".gitignore", ".ignore"}   # scc counts ignore files only with --count-ignore
+# Entries of the tables above that are file names rather than extensions (besides those with a dot).
+LANGUAGE_FILE_NAMES = {"makefile", "gnumakefile", "dockerfile", "license", "licence", "copying", "copying3", "unlicense",
+                       "unlicence", "copyright", "license-apache", "licence-apache", "license-mit", "licence-mit",
+                       "gemfile", "rakefile", "jenkinsfile", "justfile", "pkgbuild", "snakefile", "sconstruct", "sconscript",
+                       "build", "workspace", "vimrc", "gvimrc", "_vimrc", "_gvimrc"}
+# Languages of prose and data: no strings in them (an apostrophe isn't a quote).
+PROSE_LANGUAGES = {"Plain Text", "Markdown", "MDX", "ReStructuredText", "AsciiDoc", "Org", "Textile", "Creole", "License",
+                   "TaskPaper", "Rich Text Format", "TeX", "LaTeX", "Twine", "SPDX", "Patch"}
+# Generated files, as the forms' "scc --gen" finds them: a marker in the first 1,000 bytes (any case),
+# outside the folders the forms' command leaves out of that count.
+GENERATED_MARKERS = (b"do not edit", b"<auto-generated />", b"<auto-generated>")
+GENERATED_HEAD = 1000
+GENERATED_SKIP_DIRS = {"vendor", "node_modules", "dist", "build", "generated", "migrations", "Migrations"}
+# jscpd's: the shortest copy (tokens, lines), and the largest file it reads (bytes).
+CLONE_TOKENS, CLONE_LINES, CLONE_MAX_BYTES = 50, 5, 1024 * 1024
+
+Syntax = namedtuple("Syntax", "name line blocks nested quotes multiline escapes scc")
+
+
+def language_syntax(entry, scc):
+    name, _, line, blocks, quotes, flags = entry
+    if name in PROSE_LANGUAGES:
+        quotes = ""
+    return Syntax(name, tuple(line), tuple(blocks), "n" in flags, quotes, "m" in flags, "x" not in flags, scc)
+
+
+LANGUAGES = {}             # name -> Syntax
+LANGUAGE_ENTRIES = defaultdict(list)   # extension or file name (lower case) -> [names], scc's first
+for _entry in SCC_LANGUAGES + MORE_LANGUAGES:
+    LANGUAGES[_entry[0]] = language_syntax(_entry, _entry in SCC_LANGUAGES)
+    for _e in _entry[1].split():
+        LANGUAGE_ENTRIES[_e.lower()].append(_entry[0])
+
+# Extensions more than one of scc's languages has: which one a file is, by what's in it.
+LANGUAGE_BY_CONTENT = {
+    "h": [("Objective C", rb"^\s*@(interface|implementation|protocol|end)\b|^\s*#import\b"),
+          ("C++ Header", rb"\b(class|namespace|template)\b|\b(public|private|protected):|std::")],
+    "m": [("Objective C", rb"^\s*@(interface|implementation|protocol|end)\b|^\s*#import\b")],
+    "ts": [("Qt Translation Source", rb"\A\s*(<\?xml|<!DOCTYPE TS|<TS\b)")],
+    "v": [("Verilog", rb"\b(module|endmodule|always|wire|reg)\b"), ("Coq", rb"\b(Theorem|Lemma|Proof|Qed|Definition)\b")],
+    "json": [("CloudFormation (JSON)", rb"AWSTemplateFormatVersion")],
+    "yaml": [("CloudFormation (YAML)", rb"AWSTemplateFormatVersion")],
+    "yml": [("CloudFormation (YAML)", rb"AWSTemplateFormatVersion")],
+    "tex": [("LaTeX", rb"\\(documentclass|begin\{|usepackage)")],
 }
-FETCH_TOOLS = True          # --no-download: don't download scc or jscpd (copies downloaded before are still used)
-KEEP_TOOL_REPORTS = False   # --reports: save scc's and jscpd's own reports beside this one
+DEFAULT_BY_CONTENT = {"h": "C Header", "m": "MATLAB", "ts": "TypeScript", "v": "V", "json": "JSON", "yaml": "YAML",
+                      "yml": "YAML", "tex": "LaTeX"}
+# Scripts without an extension, by the program their first line (#!) names.
+SHEBANG = re.compile(rb"\A#![ \t]*(?:\S*/)?(?:env[ \t]+(?:-\S+[ \t]+)*)?([A-Za-z]+)")
+SHEBANG_LANGUAGES = {"sh": "Shell", "dash": "Shell", "bash": "BASH", "zsh": "Zsh", "ksh": "Korn Shell", "csh": "C Shell",
+                     "tcsh": "C Shell", "fish": "Fish", "python": "Python", "perl": "Perl", "ruby": "Ruby",
+                     "node": "JavaScript", "lua": "Lua", "php": "PHP", "tclsh": "TCL", "wish": "TCL", "expect": "Expect",
+                     "awk": "AWK", "gawk": "AWK", "Rscript": "R", "julia": "Julia", "elixir": "Elixir", "escript": "Erlang",
+                     "pwsh": "Powershell", "nu": "Nushell", "deno": "TypeScript", "bun": "TypeScript"}
 
 
-def this_computer():
-    """(system, cpu, C library) as PINNED_TOOLS names them."""
-    import platform
-    system = platform.system()
-    cpu = platform.machine().lower()
-    cpu = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "i386": "x86", "i686": "x86"}.get(cpu, cpu)
-    libc = ("gnu" if platform.libc_ver()[0] == "glibc" else "musl") if system == "Linux" else None
-    return system, cpu, libc
-
-
-def pinned_build(name):
-    """(url, the download's sha256, the program's sha256) of scc's or jscpd's build for this
-    computer, or None if there's none."""
-    system, cpu, libc = this_computer()
-    builds = PINNED_TOOLS[name][2]
-    return builds.get((system, cpu, libc)) or builds.get((system, cpu))
-
-
-def tools_folder():
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    elif sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Caches")
+def measured_language(name, head=b""):
+    """(Syntax, recognised by scc?) of a file by its name (and, where scc's languages share an
+    extension, the start of its contents), or (None, False). The languages named with --code-ext
+    come first: they're read with the comments of the language they're like."""
+    low = name.lower()
+    ext = os.path.splitext(low)[1]
+    if ext in EXTRA_CODE:
+        own_name, like = EXTRA_CODE[ext]
+        base = LANGUAGES[LIKE_LANGUAGES[like][0]]
+        return base._replace(name=own_name, scc=False), False
+    candidates = LANGUAGE_ENTRIES.get(low) if (low in LANGUAGE_FILE_NAMES or "." in low.strip(".") or low.startswith(".")) \
+        else None
+    if not candidates:
+        parts = low.split(".")
+        for i in range(1, len(parts)):   # "x.d.ts": "d.ts", then "ts"
+            candidates = LANGUAGE_ENTRIES.get(".".join(parts[i:]))
+            if candidates:
+                low = ".".join(parts[i:])
+                break
+    if not candidates:
+        m = SHEBANG.match(head) if "." not in name.lstrip(".") else None
+        lang = m and SHEBANG_LANGUAGES.get(re.sub(r"[\d.]+$", "", m.group(1).decode()))
+        return (LANGUAGES[lang], True) if lang else (None, False)
+    if len(candidates) > 1 and low in LANGUAGE_BY_CONTENT:
+        chosen = next((lang for lang, pattern in LANGUAGE_BY_CONTENT[low] if re.search(pattern, head, re.M)),
+                      DEFAULT_BY_CONTENT[low])
     else:
-        base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return os.path.join(base, "size_codebase_tools")
+        chosen = candidates[0]
+    syntax = LANGUAGES[chosen]
+    return syntax, syntax.scc
 
 
-def download(url):
-    """The file at url, over HTTPS with the server's certificate checked as Python always does.
-    Raises an exception if it can't be had."""
-    import urllib.request
-    with urllib.request.urlopen(url, timeout=300) as response:
-        return response.read()
+# ####################
+# Lines: code, comment, blank, as scc tells them apart
+# ####################
+_scanners = {}
+# Strings in which a backslash escapes nothing, as scc reads them: (language, how one starts).
+RAW_STRINGS = {"Python": ('r"', "r'"), "C#": ('@"',), "Dart": ('r"', "r'"), "Go": ("`",), "Rust": ('r"',)}
 
 
-def archive_member(data, name):
-    """One file's bytes from a .zip or .tar.gz, read by its exact name (nothing else is unpacked)."""
-    import io
-    if data[:2] == b"PK":
-        import zipfile
-        with zipfile.ZipFile(io.BytesIO(data)) as z:
-            return z.read(name)
-    import tarfile
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
-        member = t.extractfile(name)
-        if member is None:
-            raise KeyError(name)
-        return member.read()
+def scanner(s):
+    """The regular expression that finds, in code, the next line comment, block comment or string
+    of language s: longest first, so "/**" isn't taken for "/*"."""
+    if s.name not in _scanners:
+        items = [(m, ("line", None)) for m in s.line] + [(b[0], ("block", i)) for i, b in enumerate(s.blocks)]
+        items += [(q, ("quote", q)) for q in (s.quotes or "") if q not in RAW_STRINGS.get(s.name, ())]
+        items += [(q, ("raw", q[-1])) for q in RAW_STRINGS.get(s.name, ())]
+        items.sort(key=lambda kv: -len(kv[0]))
+        kinds = [kind for _, kind in items]
+        # (a raw string's start isn't a docstring's: r""" stays a docstring)
+        pattern = re.compile("|".join(f"({re.escape(text)}" + (f"(?!{re.escape(text[-1] * 2)})" if kind[0] == "raw" else "") + ")"
+                                      for text, kind in items)) if items else None
+        _scanners[s.name] = (pattern, kinds)
+    return _scanners[s.name]
 
 
-def find_tool(name):
-    """(path, version) of the pinned build of scc or jscpd, downloaded if need be (and allowed), or
-    (None, why it can't be used). A copy kept from before is checked against the program's checksum
-    each time: one that doesn't match is deleted, and downloaded again if allowed."""
-    import hashlib
-    version, inside, _ = PINNED_TOOLS[name]
-    build = pinned_build(name)
-    if build is None:
-        system, cpu, _ = this_computer()
-        return None, f"{name} has no build for this computer ({system}, {cpu})"
-    url, download_sha256, program_sha256 = build
-    exe = name + (".exe" if this_computer()[0] == "Windows" else "")
-    target = os.path.join(tools_folder(), f"{name}-{version}", exe)
+def file_lines(text):
+    """A file's lines as scc and jscpd count them: split at \\n, without the empty one after a last \\n."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
 
-    # ####################
-    # A copy kept from before
-    # ####################
-    replaced = ""
-    if os.path.lexists(target):
-        if not os.path.islink(target) and file_sha256(target) == program_sha256:
-            return target, version
-        try:
-            os.remove(target)
-        except OSError:
-            return None, f"the copy of {name} kept on this computer isn't the pinned build, and it couldn't be deleted"
-        replaced = f"the copy of {name} kept on this computer wasn't the pinned build, so it was deleted; "
 
-    # ####################
-    # Downloading it
-    # ####################
-    if OFFLINE:
-        left_out_offline(f"downloading {name}, which measures some of the standard measures")
-        return None, replaced + f"{name} wasn't downloaded, because of --offline"
-    if not FETCH_TOOLS:
-        return None, replaced + f"{name} isn't downloaded yet, and downloading it was turned off (--no-download)"
-    try:
-        progress(f"Downloading {name} {version} (once) from {url.split('/')[2]} ...")
-        data = download(url)
-        if hashlib.sha256(data).hexdigest() != download_sha256:
-            raise ValueError("the download doesn't match its checksum, so it wasn't used")
-        program = archive_member(data, inside + exe)
-        if hashlib.sha256(program).hexdigest() != program_sha256:
-            raise ValueError("the program in the download doesn't match its checksum, so it wasn't used")
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target + ".part", "wb") as f:
-            f.write(program)
-        os.chmod(target + ".part", 0o755)
-        os.replace(target + ".part", target)
-    except Exception as e:   # offline, a proxy, a certificate that can't be checked, a full disk ...
-        why = scrub(getattr(e, "reason", None) or e) or type(e).__name__
-        return None, replaced + f"{name} couldn't be downloaded ({why})"
-    finally:
+SCC_SPACE = " \t\r"   # what scc takes for spaces: not form feeds, vertical tabs or Unicode's other spaces
+
+
+def count_lines(text, s):
+    """(code, comment, blank) lines of text in language s, as scc counts them: a line with anything
+    outside comments is code (strings are code), one with only comments is a comment, one with
+    only whitespace is blank."""
+    lines = file_lines(text)
+    code = comment = blank = 0
+    if not s.blocks and not s.quotes:   # a line is a comment if it starts with a line comment
+        markers = s.line
+        for line in lines:
+            t = line.strip(SCC_SPACE)
+            if not t:
+                blank += 1
+            elif markers and t.startswith(markers):
+                comment += 1
+            else:
+                code += 1
+        return code, comment, blank
+    pattern, kinds = scanner(s)
+    depth, block, quote, raw = 0, None, None, False   # in a block comment (how deep, which), a string (its quote)
+    for line in lines:
+        if not line.strip(SCC_SPACE):   # inside a block comment, a comment; inside a string, code
+            if depth:
+                comment += 1
+            elif quote and s.multiline:
+                code += 1
+            else:
+                blank += 1
+                quote = None
+            continue
+        has_code = quote is not None
+        has_comment = depth > 0
+        pos, n = 0, len(line)
+        while pos < n:
+            if depth:
+                start, end = s.blocks[block]
+                j = line.find(end, pos)
+                k = line.find(start, pos) if s.nested else -1
+                if k != -1 and (j == -1 or k < j):
+                    depth += 1
+                    pos = k + len(start)
+                elif j == -1:
+                    break
+                else:
+                    depth -= 1
+                    pos = j + len(end)
+                    if not depth and end in ('"""', "'''") and line[pos:].strip(SCC_SPACE):
+                        has_code = True   # after a docstring, anything at all makes the line code, as scc has it
+                continue
+            if quote:
+                j = line.find(quote, pos)
+                while j != -1 and s.escapes and not raw:   # an escaped quote (odd backslashes before it) goes on
+                    b = j
+                    while b > pos and line[b - 1] == "\\":
+                        b -= 1
+                    if (j - b) % 2 == 0:
+                        break
+                    j = line.find(quote, j + 1)
+                if j == -1:
+                    break
+                quote, pos = None, j + 1
+                continue
+            m = pattern.search(line, pos)
+            if m is None:
+                has_code = has_code or bool(line[pos:].strip(SCC_SPACE))
+                break
+            before = line[pos:m.start()].strip(SCC_SPACE)
+            kind, which = kinds[m.lastindex - 1]
+            text_at = m.group()
+            if kind == "block" and text_at in ('"""', "'''"):   # a docstring only at a line's start (after r or f, as scc has it)
+                if line[:m.start()].strip(SCC_SPACE) not in ("", "r", "f"):
+                    kind, which = "quote", text_at[0]
+                elif before in ("r", "f"):
+                    before = ""
+            if before:
+                has_code = True
+            if kind == "line":
+                has_comment = True
+                break
+            if kind == "block":
+                has_comment, depth, block = True, 1, which
+                pos = m.end()
+            elif m.start() and line[m.start() - 1] == "\\":
+                has_code, pos = True, m.end()   # a quote after a backslash starts no string, as scc has it
+            else:
+                has_code, quote, raw = True, which, kind == "raw"
+                pos = m.end() if text_at not in ('"""', "'''") else m.start() + 1
+        if quote and not s.multiline:
+            quote = None
+        if has_code:
+            code += 1
+        elif has_comment:
+            comment += 1
+        else:
+            code += 1
+    return code, comment, blank
+
+
+# ####################
+# What .gitignore and .ignore files ignore
+# ####################
+
+def ignore_rules(dirpath, rel, filenames):
+    """The rules of the .gitignore and .ignore files in this folder (rel: its path from the scanned
+    folder, "/"), as (regex on the path from this folder, negated?, folders only?)."""
+    rules = []
+    for name in (".gitignore", ".ignore"):
+        if name not in filenames:
+            continue
+        text = read_settings_file(os.path.join(dirpath, name), 1024 * 1024).decode("utf-8", "replace")
+        for raw in text.splitlines():
+            line = raw.rstrip("\r")
+            if not line.strip() or line.startswith("#"):
+                continue
+            line = re.sub(r"(?<!\\)\s+$", "", line)
+            negated = line.startswith("!")
+            if negated:
+                line = line[1:]
+            line = line.replace("\\#", "#").replace("\\!", "!").replace("\\ ", " ")
+            folders_only = line.endswith("/")
+            line = line.rstrip("/")
+            if not line:
+                continue
+            anchored = "/" in line
+            pattern = glob_regex(line.lstrip("/"))
+            rules.append((re.compile(("" if anchored else r"(?:.*/)?") + pattern + r"\Z"), negated, folders_only))
+    return rules
+
+
+def glob_regex(glob):
+    """A .gitignore pattern as a regular expression on a path: * and ? within one folder, ** across folders."""
+    out, i = "", 0
+    while i < len(glob):
+        c = glob[i]
+        if glob.startswith("**/", i):
+            out, i = out + r"(?:.*/)?", i + 3
+        elif glob.startswith("/**", i) and i + 3 == len(glob):
+            out, i = out + r"/.*", i + 3
+        elif glob.startswith("**", i):
+            out, i = out + r".*", i + 2
+        elif c == "*":
+            out, i = out + r"[^/]*", i + 1
+        elif c == "?":
+            out, i = out + r"[^/]", i + 1
+        elif c == "[":
+            j = glob.find("]", i + 2)
+            if j == -1:
+                out, i = out + r"\[", i + 1
+            else:
+                body = glob[i + 1:j]
+                out += "[" + ("^" + body[1:] if body.startswith("!") else body).replace("\\", "\\\\") + "]"
+                i = j + 1
+        else:
+            out, i = out + re.escape(c), i + 1
+    return out
+
+
+def is_ignored(rules, path, folder):
+    """Do these rules ([(base folder, rules)], outermost first) ignore path (from the scanned folder, "/")?"""
+    ignored = False
+    for base, folder_rules in rules:
+        sub = path[len(base) + 1:] if base else path
+        for pattern, negated, folders_only in folder_rules:
+            if (folder or not folders_only) and pattern.match(sub):
+                ignored = not negated
+    return ignored
+
+
+# ####################
+# Copies of code, as jscpd finds them
+# ####################
+TOKEN_REST = r"[^\W\d]\w*|\d+(?:\.\d+)?|[^\s\w]"   # words, numbers, and each other character
+# How jscpd reads comments, which isn't the same in every language: in these it drops them; in
+# these it splits a /* block comment */ into its words, its other characters and its runs of
+# spaces (each one token); elsewhere a comment is one token.
+COMMENTS_DROPPED = {"JavaScript", "TypeScript", "TypeScript Typings", "JSX", "Vue", "Svelte", "Astro"}
+COMMENTS_SPLIT = {"C", "C Header", "C++", "C++ Header", "C#", "Java", "Go", "Rust", "Swift", "Kotlin", "PHP", "CSS", "Sass",
+                  "LESS", "Dart", "Scala", "Groovy", "Objective C", "Objective C++", "Haxe", "ActionScript", "Cuda",
+                  "GLSL", "HLSL", "Cg", "ShaderLab", "Unreal Shader", "Godot Shader", "GLSL include", "Pixel Shader File",
+                  "Metal", "Unreal Script", "Game Maker Language", "Squirrel", "Ink", "SkookumScript", "AngelScript"}
+COMMENT_PIECE = re.compile(r"/\*|\*/|\n|[^\S\n]+|[^\W\d]\w*|\d+(?:\.\d+)?|[^\s\w]")
+
+
+def duplication_group(s, name):
+    """Which files jscpd compares with which: by language, but every .h together (jscpd's c-header,
+    whatever its contents), and TypeScript's typings with TypeScript."""
+    if name.lower().endswith(".h"):
+        return "C Header"
+    return MARKUP if s.name in MARKUP_LANGUAGES else {"TypeScript Typings": "TypeScript"}.get(s.name, s.name)
+
+
+MARKUP = "HTML, XML and SVG"   # jscpd's "markup": one kind of file
+MARKUP_LANGUAGES = {"HTML", "XHTML", "XML", "SVG", "XAML", "MSBuild", "XML Schema", "Extensible Stylesheet Language Transformations",
+                    "Web Services Description Language", "FXML", "nuspec", "Qt Translation Source", "Report Definition Language"}
+_tokenizers = {}
+
+
+def tokenizer(s):
+    """The regular expression that splits code in language s into tokens, as jscpd does: each
+    comment and string one token, each word and number one, and every other character one; spaces
+    and line ends none. As jscpd reads them, a string ends at its line's end, and a docstring's
+    triple quotes are an empty string and a quote, like any other."""
+    if s.name not in _tokenizers:
+        blocks = [b for b in s.blocks if b[0][0] not in "\"'"]
+        parts = [re.escape(a) + r"[\s\S]*?(?:" + re.escape(b) + r"|\Z)" for a, b in sorted(blocks, key=lambda b: -len(b[0]))]
+        # A comment that starts with a letter or "*" (Fortran's C, COBOL's *, REM) only at a line's start.
+        parts += [(r"^[ \t]*" if m[0].isalpha() or m[0] == "*" else "") + re.escape(m) + r"[^\n]*"
+                  for m in sorted(s.line, key=len, reverse=True)]
+        quotes = s.quotes or ("" if s.name in PROSE_LANGUAGES or "'" in "".join(s.line) else "\"'")
+        for q in quotes:
+            parts.append(re.escape(q) + r"(?:\\.|[^" + re.escape(q) + r"\\\n])*(?:" + re.escape(q) + r"|$)")
+        _tokenizers[s.name] = re.compile("|".join(parts + [TOKEN_REST]), re.M)
+    return _tokenizers[s.name]
+
+
+class Duplication:
+    """Collects the studio's files, as tokens, then finds the code found again elsewhere, as jscpd
+    does with the forms' options: every run of CLONE_TOKENS tokens is looked up among those seen
+    before (in files of the same language, or earlier in the same file); a copy goes on for as long
+    as the runs that follow have been seen before too, and counts if it spans CLONE_LINES lines or
+    more. Each copy adds its lines to the duplicated lines, as in jscpd's report (so lines in two
+    copies that overlap count twice). Files with fewer tokens or lines than that, or over
+    CLONE_MAX_BYTES, are left out, as jscpd leaves them out."""
+    BASE, MOD = 1_000_003, (1 << 61) - 1
+
+    def __init__(self):
+        self.ids = {}                                 # token text -> number
+        self.files = defaultdict(list)                # language -> [(token numbers, first lines, last lines, lines)]
+
+    def saw_file(self, text, s, size, name=""):
+        if size > CLONE_MAX_BYTES:
+            return
+        lines = len(file_lines(text))
+        if lines < CLONE_LINES:
+            return
+        ids, firsts, lasts = array("l"), array("l"), array("l")
+        line, last = 1, 0
+        intern = self.ids.setdefault
+        comments = {m for m in s.line} | {a for a, _ in s.blocks}
+        drop, split = s.name in COMMENTS_DROPPED, s.name in COMMENTS_SPLIT
+        for m in tokenizer(s).finditer(text):
+            start = m.start()
+            line += text.count("\n", last, start)
+            token = m.group()
+            last = m.end()
+            if (drop or split) and token.lstrip().startswith(tuple(comments)):
+                if drop:
+                    line += token.count("\n")
+                    continue
+                if token.startswith("/*"):
+                    for piece in COMMENT_PIECE.findall(token):
+                        ids.append(intern(piece, len(self.ids)))
+                        firsts.append(line)
+                        lasts.append(line)
+                        line += piece == "\n"
+                    continue
+            ids.append(intern(token, len(self.ids)))
+            firsts.append(line)
+            inside = token.count("\n")
+            lasts.append(line + inside)
+            line += inside
+        if len(ids) >= CLONE_TOKENS:
+            self.files[duplication_group(s, name)].append((ids, firsts, lasts, lines))
+
+    def windows(self, ids):
+        """The hash (1 or more) of every run of CLONE_TOKENS tokens."""
+        base, mod, k = self.BASE, self.MOD, CLONE_TOKENS
+        top = pow(base, k - 1, mod)
+        h = 0
+        for t in ids[:k]:
+            h = (h * base + t) % mod
+        out = [h + 1]
+        for i in range(k, len(ids)):
+            h = ((h - ids[i - k] * top) * base + ids[i]) % mod
+            out.append(h + 1)
+        return out
+
+    def measure(self):
+        """{language: {"files", "lines", "duplicated_lines", "clones", "tokens", "duplicated_tokens"}}."""
+        out = {}
+        k = CLONE_TOKENS
+        for lang, files in self.files.items():
+            # The runs seen so far: an open-addressing table of their hashes, 8 bytes a place, at most
+            # half full (a Python set would take about 70 bytes a run).
+            size = 1 << max(4, (2 * sum(len(f[0]) - k + 1 for f in files)).bit_length())
+            table, mask = array("q", bytes(8 * size)), size - 1
+            stats = {"files": len(files), "lines": sum(f[3] for f in files), "duplicated_lines": 0, "clones": 0,
+                     "tokens": sum(len(f[0]) for f in files), "duplicated_tokens": 0}
+
+            def copy_found(start, end, firsts, lasts):   # the copy's runs: start ... end (the last)
+                first, last = firsts[start], lasts[end + k - 1]
+                if last - first + 1 >= CLONE_LINES:
+                    stats["clones"] += 1
+                    stats["duplicated_lines"] += last - first + 1
+                    stats["duplicated_tokens"] += end + k - start
+
+            for ids, firsts, lasts, _ in files:
+                start = None   # the copy going on: its first run
+                for i, h in enumerate(self.windows(ids)):
+                    at = h & mask
+                    while True:               # seen before? (and if not, it is now)
+                        held = table[at]
+                        if held == h or not held:
+                            break
+                        at = (at + 1) & mask
+                    if held:
+                        if start is None:
+                            start = i
+                        continue
+                    table[at] = h
+                    if start is not None:
+                        copy_found(start, i - 1, firsts, lasts)
+                        start = None
+                if start is not None:
+                    copy_found(start, len(ids) - k, firsts, lasts)
+            out[lang] = stats
+        return out
+
+
+# ####################
+# Collecting and reporting
+# ####################
+class Measures:
+    """Collects the studio's own files while the folder is walked: their lines by language, as scc
+    counts them, and their tokens, for the copies jscpd would find."""
+
+    def __init__(self):
+        self.by_language = defaultdict(lambda: Counter())   # language -> files, lines, code, comment, blank, bytes
+        self.generated = 0          # logical lines in generated files
+        self.not_scc = Counter()    # language scc doesn't recognise -> logical lines
+        self.duplication = Duplication()
+
+    def saw_file(self, path, rel_file, name, data=None, size=0):
+        """Counts one of the studio's own files (data: its bytes, if already read)."""
+        if name in MEASURE_SKIP_FILES or os.path.splitext(name)[1].lower() in MEASURE_SKIP_EXTS:
+            return
+        if data is None:
+            s, _ = measured_language(name)
+            if s is None and "." not in name.lstrip("."):   # a script without an extension, maybe
+                s, _ = measured_language(name, read_settings_file(path, 256))
+            if s is None:
+                return
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+            except OSError:
+                return
+        if b"\0" in data[:10000]:   # binary, as scc skips it
+            return
+        s, by_scc = measured_language(name, data[:8000])
+        if s is None:
+            return
+        text = data.decode("utf-8", "replace")
+        if s.name == "Visual Basic 6 form":   # its layout isn't code: only what follows it
+            first = re.search(r"^Attribute VB_", text, re.M)
+            text = text[first.start():] if first else text
+        code, comment, blank = count_lines(text, s)
+        row = self.by_language[s.name]
+        row.update({"files": 1, "lines": code + comment + blank, "code": code, "comment": comment, "blank": blank,
+                    "bytes": len(data)})
+        if not by_scc:
+            self.not_scc[s.name] += code
+        head = data[:GENERATED_HEAD].lower()
+        folders = set(rel_file.replace(os.sep, "/").split("/")[:-1])
+        if any(marker.lower() in head for marker in GENERATED_MARKERS) and not folders & GENERATED_SKIP_DIRS:
+            self.generated += code
+        self.duplication.saw_file(text, s, len(data), name)
+
+    def figures(self):
+        """The figures for the standard measures (see standard_measures_report), and the reports
+        --reports saves: lines by language (as scc's JSON report has them) and the duplication
+        totals (as jscpd's report's "statistics")."""
+        progress("Looking for copies of code ...")
+        dup = self.duplication.measure()
         progress()
-    return target, version
+        logical = sum(row["code"] for row in self.by_language.values())
+        lines = sum(v["lines"] for v in dup.values())
+        duplicated = sum(v["duplicated_lines"] for v in dup.values())
+        found = {
+            "logical_lines": logical, "generated_lines": self.generated,
+            "logical_lines_by_language": dict(Counter({k: v["code"] for k, v in self.by_language.items()}).most_common()),
+            "duplication_ratio": round(duplicated / lines, 4) if lines else 0.0,
+            "duplicated_lines": duplicated, "duplication_lines": lines,
+            "duplication_by_language": {lang: {"lines": v["lines"], "duplicated_lines": v["duplicated_lines"],
+                                               "duplication_ratio": round(v["duplicated_lines"] / v["lines"], 4)}
+                                        for lang, v in sorted(dup.items(), key=lambda kv: -kv[1]["lines"])},
+            "logical_lines_in_languages_scc_doesnt_know": dict(self.not_scc),
+        }
+        reports = {
+            "lines": json.dumps([{"Name": lang, "Count": row["files"], "Lines": row["lines"], "Code": row["code"],
+                                  "Comment": row["comment"], "Blank": row["blank"], "Bytes": row["bytes"]}
+                                 for lang, row in sorted(self.by_language.items(), key=lambda kv: -kv[1]["code"])], indent=2),
+            "duplication": json.dumps({"statistics": {
+                "detectionDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "formats": {lang: duplication_totals(v) for lang, v in dup.items()},
+                "total": duplication_totals({key: sum(v[key] for v in dup.values()) for key in
+                                             ("files", "lines", "duplicated_lines", "clones", "tokens", "duplicated_tokens")})}},
+                indent=2)}
+        return found, reports
+
+
+def duplication_totals(v):
+    """Duplication figures named as jscpd's report names them."""
+    lines, tokens = v.get("lines", 0), v.get("tokens", 0)
+    return {"sources": v.get("files", 0), "lines": lines, "tokens": tokens, "clones": v.get("clones", 0),
+            "duplicatedLines": v.get("duplicated_lines", 0), "duplicatedTokens": v.get("duplicated_tokens", 0),
+            "percentage": round(100 * v.get("duplicated_lines", 0) / lines, 2) if lines else 0,
+            "percentageTokens": round(100 * v.get("duplicated_tokens", 0) / tokens, 2) if tokens else 0}
 
 
 # ####################
-# Running them
+# What's left out
 # ####################
-
-def run_tool(name, path, args, cwd, timeout=900):
-    """Runs scc or jscpd (path from find_tool), after checking once more that it's the pinned build."""
-    build = pinned_build(name)
-    if build is None or os.path.islink(path) or file_sha256(path) != build[2]:
-        return None
-    return run([path, *args], cwd, timeout)
-
-
-def added_code(unrecognised=()):
-    """The code scc and jscpd are told about: the languages named with --code-ext, and the extensions
-    among unrecognised (see UNRECOGNISED_CODE) that they don't name. {extension: (name, like)}."""
-    added = {ext: (CODE_EXTS[ext], UNRECOGNISED_CODE[ext]) for ext in unrecognised if ext in UNRECOGNISED_CODE}
-    added.update(EXTRA_CODE)
-    return added
-
-
-def extra_code_args(unrecognised=()):
-    """(scc's, jscpd's) options for the code they're told about (see added_code)."""
-    scc, formats = [], defaultdict(list)
-    for ext, (name, like) in sorted(added_code(unrecognised).items()):
-        scc_like, jscpd_like = LIKE_LANGUAGES[like]
-        for variant in sorted({ext, ext.upper()}):
-            scc += ["--count-as-pattern", f"*{glob_escape(variant)}:{name}:{scc_like}"]
-        formats[jscpd_like] += [ext[1:], ext[1:].upper()]
-    jscpd = ["--formats-exts", ";".join(f"{f}:{','.join(exts)}" for f, exts in sorted(formats.items()))] if formats else []
-    return scc, jscpd
-
-def glob_escape(path):
-    return re.sub(r"([*?\[\]{}])", r"[\1]", path)
-
-
-def is_left_out(rel, leave_out):
-    """Is this file (relative path, with /) one of leave_out ("folder/**" or "file"), or inside one?"""
-    parts = os.path.normcase(rel).replace("\\", "/").split("/")
-    return any("/".join(parts[:i]) in leave_out for i in range(1, len(parts) + 1)) or "**" in leave_out
-
 
 def left_out_paths(root, transitions, files, kept):
-    """What scc and jscpd should leave out: the folders where the studio's own code gives way to
+    """What the standard measures leave out: the folders where the studio's own code gives way to
     someone else's (or to build output), as "folder/**", and someone else's files among its own.
     kept: paths marked as the studio's own by hand, which may lie inside such a folder; then the
     folder's other contents are left out one by one instead."""
@@ -6449,142 +8123,19 @@ def left_out_paths(root, transitions, files, kept):
     return sorted(out)
 
 
-def tool_measures(root, leave_out, unrecognised=()):
-    """scc's and jscpd's figures, with the options forms give, for the studio's own code: leave_out
-    lists the folders ("folder/**") and files that aren't (see left_out_paths). scc counts the whole
-    folder file by file, so the figure for all of it comes too. unrecognised: extensions of the
-    studio's own code that the tools are told to read (see UNRECOGNISED_CODE); scc's figure without
-    them comes too, as the forms' commands give it. ({figures}, {tool: why it wasn't run}, {tool:
-    its report to save, if KEEP_TOOL_REPORTS}). jscpd's own report holds copies of the code, so only
-    its totals are kept (jscpd_summary)."""
-    found, missing, reports = {}, {}, {}
-    matching = {os.path.normcase(p[:-3] if p.endswith("/**") else p).replace("\\", "/") for p in leave_out}
-    matching |= {"**"} if "**" in leave_out else set()
-    scc_extra, jscpd_extra = extra_code_args(unrecognised)
-    told = {ext: [name, like] for ext, (name, like) in added_code(unrecognised).items() if ext not in EXTRA_CODE}
-    if told:
-        found["unrecognised_code_read_as"] = dict(sorted(told.items()))
-
-    # ####################
-    # scc
-    # ####################
-    scc, version = find_tool("scc")
-    if scc is None:
-        missing["scc"] = version
-    else:
-        progress("Counting lines with scc ...")
-        for key, extra in (("logical", []), ("generated", SCC_GENERATED_ARGS)):
-            try:
-                langs = json.loads(run_tool("scc", scc, [*SCC_ARGS, *scc_extra, *extra, "--by-file", "--format", "json",
-                                                        "."], root) or "null")
-            except ValueError:
-                langs = None
-            if not isinstance(langs, list):
-                missing["scc"] = "scc ran, but failed"
-                for figure in ("scc_logical_lines", "scc_whole_folder_logical_lines", "scc_logical_lines_by_language",
-                               "scc_logical_lines_without_unrecognised"):
-                    found.pop(figure, None)
-                break
-            files = [(str(lang.get("Name", "")), f) for lang in langs for f in lang.get("Files") or []]
-            own_files = [(lang, f) for lang, f in files
-                         if not is_left_out(re.sub(r"^\.[/\\]", "", str(f.get("Location", ""))), matching)]
-            own = [(lang, int(f.get("Code", 0))) for lang, f in own_files]
-            if key == "logical":
-                found["scc_logical_lines"] = sum(n for _, n in own)
-                found["scc_whole_folder_logical_lines"] = sum(int(f.get("Code", 0)) for _, f in files)
-                by_lang = Counter()
-                for lang, n in own:
-                    by_lang[lang] += n
-                found["scc_logical_lines_by_language"] = dict(by_lang.most_common())
-                if told:
-                    found["scc_logical_lines_without_unrecognised"] = sum(
-                        int(f.get("Code", 0)) for _, f in own_files
-                        if os.path.splitext(str(f.get("Location", "")))[1].lower() not in told)
-            else:
-                found["scc_generated_lines"] = sum(n for lang, n in own if lang.endswith("(gen)"))
-        else:
-            found["scc_version"] = version
-            if KEEP_TOOL_REPORTS:
-                reports["scc"] = run_tool("scc", scc, [*SCC_ARGS, *scc_extra, "--format", "json", "."], root)
-        progress()
-
-    # ####################
-    # jscpd
-    # ####################
-    jscpd, version = find_tool("jscpd")
-    if jscpd is None:
-        missing["jscpd"] = version
-    else:
-        out = temp_folder("jscpd")
-        progress("Measuring duplication with jscpd (slow on big projects) ...")
-        try:
-            config = os.path.join(out, "jscpd.json")
-            with open(config, "w", encoding="utf-8") as f:
-                json.dump({"ignore": JSCPD_IGNORE + [glob_escape(p[:-3]) + "/**" if p.endswith("/**") else
-                                                     "**" if p == "**" else glob_escape(p) for p in leave_out]}, f)
-            run_tool("jscpd", jscpd, [".", *JSCPD_ARGS, *jscpd_extra, "--output", out, "--config", config], root, 3600)
-            with open(os.path.join(out, "jscpd-report.json"), encoding="utf-8") as f:
-                text = f.read()
-            total = json.loads(text)["statistics"]["total"]
-            percentage = float(total.get("percentage") or 0)
-            found["jscpd_duplication_ratio"] = round(percentage / 100, 4) if percentage == percentage else 0.0
-            found["jscpd_duplicated_lines"], found["jscpd_lines"] = total.get("duplicatedLines"), total.get("lines")
-            found["jscpd_by_format"] = jscpd_by_format(text)
-            found["jscpd_version"] = version
-            if KEEP_TOOL_REPORTS:
-                reports["jscpd"] = jscpd_summary(text)
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            missing["jscpd"] = "jscpd ran, but failed"
-        finally:
-            shutil.rmtree(out, ignore_errors=True)
-            progress()
-    return found, missing, reports
-
-
-def jscpd_by_format(text):
-    """jscpd's figures for each kind of file it read (its "formats": python, txt ...), most lines
-    first: {format: {"lines", "duplicated_lines", "duplication_ratio"}}. Counts only."""
-    out = {}
-    for fmt, v in (json.loads(text)["statistics"].get("formats") or {}).items():
-        v = (v or {}).get("total") if "total" in (v or {}) else (v or {})
-        lines, duplicated = v.get("lines"), v.get("duplicatedLines")
-        if not isinstance(lines, int) or not isinstance(duplicated, int):
-            continue
-        out[re.sub(r"[^\w+#.-]", "", str(fmt))[:40]] = {
-            "lines": lines, "duplicated_lines": duplicated,
-            "duplication_ratio": round(duplicated / lines, 4) if lines else 0.0}
-    return dict(sorted(out.items(), key=lambda kv: -kv[1]["lines"]))
-
-
-def jscpd_summary(text):
-    """jscpd's report cut down to its totals, as forms ask for it ({"statistics": ...}): the numbers
-    for each format and in all, and the date. The rest of the report (each copy, with the code
-    copied and the files it's in) is left behind, and so is anything in the totals that isn't a
-    number, so no code and no file name can get through."""
-    stats = json.loads(text)["statistics"]
-
-    def numbers(d):
-        return {k: v for k, v in (d or {}).items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
-    return json.dumps({"statistics": {
-        "detectionDate": str(stats.get("detectionDate", ""))[:40],
-        "formats": {re.sub(r"[^\w+#.-]", "", str(fmt))[:40]: numbers((v or {}).get("total") if "total" in (v or {}) else v)
-                    for fmt, v in (stats.get("formats") or {}).items()},
-        "total": numbers(stats.get("total"))}}, indent=2)
-
-
 # ##############################
 # Report section
 # ##############################
 AI_ERA = "2022"   # changes made before this year were almost certainly written without AI assistants
-TOOL_FIGURES = {"scc": "logical lines of code and generated lines (scc)", "jscpd": "the duplication ratio (jscpd)"}
+MEASURED_AS = "counted by this script as scc 4.1.0 and jscpd 5.4.1 count them, with the forms' options"
+KEEP_TOOL_REPORTS = False   # --reports: save the lines by language and the duplication totals beside the report
 
 
-def standard_measures_report(histories, vcs_found, tools, missing, left_out, own_languages, database_languages):
-    """(report lines, facts) for the standard measures: scc's and jscpd's figures (see tool_measures)
-    where they could be run (missing: {tool: why not}), the commits forms count, and the primary
-    language. own_languages: the apparently original code's non-blank lines by language as forms
-    name them (the tables above); database_languages: the part of them read from databases, which
-    scc can't see."""
+def standard_measures_report(histories, vcs_found, tools, left_out, database_languages):
+    """(report lines, facts) for the standard measures: the logical lines and duplication of the
+    studio's own files (tools: Measures.figures), the commits forms count, and the primary language.
+    database_languages: the non-blank lines of the code read from databases, by language as forms
+    name them, which a count of files can't see."""
 
     # ####################
     # The figures
@@ -6608,69 +8159,55 @@ def standard_measures_report(histories, vcs_found, tools, missing, left_out, own
                     " snapshot")
     where = "; ".join(f"{h['vcs']}" + (f" {h['standard_branch']}" if h.get("standard_branch") else "")
                       for h in counted)
-    scc = "scc_logical_lines" in tools
-    jscpd = "jscpd_duplication_ratio" in tools
-    measured = " and ".join(f"{t} {tools[t + '_version']}" for t in ("scc", "jscpd") if t + "_version" in tools)
 
-    # Primary language: by scc's logical lines, with the code read from databases (which scc can't
-    # see) as its non-blank lines; without scc, by the non-blank lines in the tables above.
+    # Primary language: by the logical lines, with the code read from databases as its non-blank lines.
     database_lines = sum(database_languages.values())
-    if scc:
-        langs = Counter()
-        for lang, n in tools.get("scc_logical_lines_by_language", {}).items():
-            if lang not in SCC_NOT_CODE:
-                langs[form_language(lang)] += n
-        langs.update(database_languages)
-        basis = "scc's logical lines" + (", and the non-blank lines of the code read from databases, which scc can't"
-                                         " see" if database_lines else "")
-    else:
-        langs = own_languages
-        basis = "this script's own line counts above (non-blank lines), as scc wasn't run"
+    langs = Counter()
+    for lang, n in tools.get("logical_lines_by_language", {}).items():
+        if lang not in SCC_NOT_CODE:
+            langs[form_language(lang)] += n
+    langs.update(database_languages)
+    basis = "the logical lines" + (", and the non-blank lines of the code read from databases, which aren't in files"
+                                   if database_lines else "")
     language, raw = primary_language(langs)
+    beyond_scc = tools.get("logical_lines_in_languages_scc_doesnt_know") or {}
 
     # ####################
     # Report lines
     # ####################
-    out = ["", "Standard measures, as buyers' codebase forms ask for them, of the apparently original code above"
-               + (f"\n(measured with {measured}, with the forms' options):" if measured else ":")]
-    if scc:
-        out += [f"  {'Logical lines of code (scc)':<56} {tools['scc_logical_lines']:>12,}",
-                f"  {'  of which generated (scc --gen)':<56} {tools['scc_generated_lines']:>12,}"]
-    if jscpd:
-        out.append(f"  {'Duplication ratio (jscpd)':<56} {tools['jscpd_duplication_ratio']:>12.4f}")
-    out += [f"  {'Commits on the main branch, without merges or reverts':<56} "
-            + (f"{commits:>12,}   ({where})" if counted else f"{'none':>12}"),
-            f"  {'Repositories':<56} {max(1, len(live)):>12,}",
-            f"  {'Primary language':<56} {language or '?':>12}" + (f"   ({raw})" if raw and raw != language else ""),
-            f"  {'History':<56} {delivery}"]
+    out = ["", "Standard measures, as buyers' codebase forms ask for them, of the apparently original code above",
+           f"({MEASURED_AS}):",
+           f"  {'Logical lines of code (as scc counts them)':<56} {tools['logical_lines']:>12,}",
+           f"  {'  of which generated (as scc --gen finds them)':<56} {tools['generated_lines']:>12,}",
+           f"  {'Duplication ratio (as jscpd measures it)':<56} {tools['duplication_ratio']:>12.4f}",
+           f"  {'Commits on the main branch, without merges or reverts':<56} "
+           + (f"{commits:>12,}   ({where})" if counted else f"{'none':>12}"),
+           f"  {'Repositories':<56} {max(1, len(live)):>12,}",
+           f"  {'Primary language':<56} {language or '?':>12}" + (f"   ({raw})" if raw and raw != language else ""),
+           f"  {'History':<56} {delivery}"]
+    ai_marked = sum(dict(h["rows"]).get(AI_ROW, 0) for h in live)
     if dates:
         out.append(f"  {'Changes made before ' + AI_ERA + ' (before AI coding assistants)':<56} {before:>12,}"
                    f"   of {len(dates):,} ({100 * before // len(dates)}%)")
-    if measured and left_out:
+        if len(dates) > before:
+            out.append(f"  {'Changes marked as made with AI coding tools':<56} {ai_marked:>12,}"
+                       f"   of the {len(dates) - before:,} since (unmarked changes may have used them too)")
+    if left_out:
         n = len(left_out)
         out.append(f"  (left out as not the studio's own: {n:,} {'folder or file' if n == 1 else 'folders and files'},"
-                   " such as libraries, plugins, build output and translations"
-                   + (f"; the whole folder has {tools['scc_whole_folder_logical_lines']:,} logical lines)" if scc
-                      else ")"))
-    told = tools.get("unrecognised_code_read_as") or {}
-    if told and (scc or jscpd):
-        by_name = defaultdict(list)
-        for ext, (name, like) in told.items():
-            by_name[(name, like)].append(ext)
-        how = "; ".join(f"{', '.join(exts)} as {name}, " + ("every non-blank line counted" if like == "text"
-                                                             else f"with {like}'s comments")
-                        for (name, like), exts in sorted(by_name.items()))
-        which = " and ".join(t for t, ran in (("scc", scc), ("jscpd", jscpd)) if ran)
-        out.append(f"  ({which} {'doesn' if which in ('scc', 'jscpd') else 'don'}'t recognise some of the code, so"
-                   f" {'it was' if which in ('scc', 'jscpd') else 'they were'} told to read it: {how}"
-                   + (f". Without it, as the forms' commands give it: "
-                      f"{tools['scc_logical_lines_without_unrecognised']:,} logical lines)"
-                      if "scc_logical_lines_without_unrecognised" in tools else ")"))
-    formats = tools.get("jscpd_by_format") or {}
-    if jscpd and len(formats) > 1:
-        out.append("  (jscpd by kind of file: " + ", ".join(
-            f"{fmt} {v['duplication_ratio']:.4f} of {plural(v['lines'], 'line')}" for fmt, v in formats.items()) + ")")
-    if language and (not scc or database_lines):
+                   " such as libraries, plugins, build output and translations; and, as scc and jscpd leave them out,"
+                   " what .gitignore files ignore)")
+    if beyond_scc:
+        n = sum(beyond_scc.values())
+        out.append(f"  (of the logical lines, {n:,} are in languages scc doesn't recognise, counted here with their own"
+                   f" comments: {', '.join(f'{lang} {k:,}' for lang, k in sorted(beyond_scc.items(), key=lambda kv: -kv[1]))}."
+                   f" A buyer running scc would get {tools['logical_lines'] - n:,})")
+    by_language = tools.get("duplication_by_language") or {}
+    if len(by_language) > 1:
+        out.append("  (duplication by language: " + ", ".join(
+            f"{lang} {v['duplication_ratio']:.4f} of {plural(v['lines'], 'line')}"
+            for lang, v in list(by_language.items())[:8]) + (" ..." if len(by_language) > 8 else "") + ")")
+    if language and database_lines:
         out.append(f"  (primary language from {basis})")
     if counted and len(counted) < len(live):
         out.append(f"  (commits from {len(counted)} of the {len(live)} histories: the others couldn't be counted)")
@@ -6682,34 +8219,16 @@ def standard_measures_report(histories, vcs_found, tools, missing, left_out, own
                                         else [])) + ")")
 
     # ####################
-    # What's not included, and how to include it
-    # ####################
-    if missing:
-        out += ["", "NOTE: Not included in the standard measures above, as the tool that measures them couldn't be used:"]
-        out += [f"      - {TOOL_FIGURES[tool]}: {why}" for tool, why in missing.items()]
-        whys = " ".join(missing.values())
-        if "download" in whys:
-            out.append("      To include them, run this again on a computer with an internet connection"
-                       + (", without --offline" if OFFLINE else ", without --no-download" if not FETCH_TOOLS else "")
-                       + ": scc and jscpd are downloaded once, then kept.")
-        if "certificate" in whys.lower() and sys.platform == "darwin":
-            out += ["      The download failed because Python couldn't check the server's certificate. With Python from",
-                    "      python.org, open the Python folder in Applications, double-click \"Install Certificates.command\",",
-                    "      then run this again."]
-
-    # ####################
     # Facts, for the machine-readable copy
     # ####################
-    facts = {"logical_lines": tools["scc_logical_lines"] if scc else None,
-             "generated_lines": tools["scc_generated_lines"] if scc else None,
-             "duplication_ratio": tools["jscpd_duplication_ratio"] if jscpd else None,
-             "measured_with": measured or None, "not_measured": missing,
+    facts = {"measured_as": MEASURED_AS,
              "commits_main_branch_no_merges_or_reverts": commits if counted else None,
              "commit_branches": where or None, "repositories": max(1, len(live)),
              "primary_language": language, "primary_language_detail": raw,
              "primary_language_from": basis if language else None, "history": delivery,
              "changes_before_" + AI_ERA: [before, len(dates)] if dates else None,
-             "left_out": len(left_out) if measured else None,   # how many: their names stay out of reports
+             "changes_marked_ai": ai_marked if dates else None,
+             "left_out": len(left_out),   # how many: their names stay out of reports
              "version_control": vcs_found, **tools}
     return out, facts
 
@@ -6759,8 +8278,9 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     dbcode = DatabaseCode()
     test_coverage = CoverageReports()
     source_lines = Counter()   # own lines read from source files, by language (the rest came from databases)
-    unrecognised = set()       # extensions of the studio's own code that scc and jscpd must be told about
-    c_family = Counter()       # own C/C++ lines, as forms name them: "C", "C header", "C++"
+    measures = Measures()      # the studio's own files, for the standard measures
+    rules_at = {walk_root: []}   # folder -> the .gitignore and .ignore rules that apply in it
+    unmeasured_paths = set()   # Git submodules: scc leaves them out of its count, so the measures do too
     not_own_folders = []    # where the studio's own code gives way to someone else's, or to build output
     unknown_text = defaultdict(lambda: [0, 0])   # text files of unknown kinds among the studio's own: [files, bytes]
     textual = {}            # extension -> whether its files are text
@@ -6789,6 +8309,13 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     submodule_list = []     # (folder, third-party?)
     root_owner = repo_owner(next((url for remote, url in git_remotes(root) if remote == "origin"), ""))
     assets = Counter()
+    assets_theirs = Counter()   # of assets, those in someone else's folders (plugins, packs, samples ...)
+    assets_by_library = Counter()   # someone else's asset files by library, pack or plugin
+    library_terms = {}      # library, pack or plugin -> where it comes from, or its licence
+    own_frameworks = []     # (folder, what) of the studio's own plugins, packages and submodules
+    game_content = GameContent()
+    online = OnlineServices()
+    practices = Practices()
     projects = []
     total_bytes = total_files = 0
     years = Counter()
@@ -6807,7 +8334,16 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     # Inherited by each folder: its category ("own", "test", "third-party" or "engine"); where it
     # is relative to a Unity project (None, "assets" = the Assets folder itself, "inside" = below
     # it); which kinds of project enclose it; and, for third-party code, the library's name.
-    inherited = {walk_root: ("own", None, frozenset(), None, None)}
+    inherited = {walk_root: ("own", None, frozenset(), None, None, False)}
+
+    def saw_asset(kind):
+        """Counts an asset file of this kind: the one the walk is at (own_file, library, rel_file)."""
+        assets[kind] += 1
+        if not own_file:
+            assets_theirs[kind] += 1
+            assets_by_library[library or ("Unreal Engine's own" if category == "engine" else "other")] += 1
+        if kind == "Scenes/levels":
+            game_content.saw_level(own_file, rel_file)
 
     # ##############################
     # Walking the folder
@@ -6819,7 +8355,11 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         # ####################
         # The kinds of project rooted here
         # ####################
-        category, unity, enclosing, library, platform = inherited.pop(dirpath)
+        category, unity, enclosing, library, platform, unmeasured = inherited.pop(dirpath)
+        rules = rules_at.pop(dirpath, [])
+        if not unmeasured and (".gitignore" in filenames or ".ignore" in filenames):
+            rules = rules + [("" if dirpath == walk_root else os.path.relpath(dirpath, walk_root).replace(os.sep, "/"),
+                              ignore_rules(dirpath, os.path.relpath(dirpath, walk_root), filenames))]
         came_own = category in ("own", "test")
         in_unity_assets = unity is not None
         rel = os.path.relpath(dirpath, walk_root)
@@ -6833,6 +8373,16 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
             projects.append((kind, rel, detail))
         if kinds.get("Unreal") == CUSTOM_ENGINE:
             custom_engines.append((dirpath, engine_association(dirpath, filenames)))
+        if category in ("own", "test"):
+            game_content.saw_project(kinds, dirpath, rel)
+            uproject = next((f for f in filenames if f.lower().endswith(".uproject")), None)
+            try:
+                if "Unreal" in kinds and uproject:
+                    online.saw_unreal_project(dirpath, uproject)
+                if "Unity" in kinds:
+                    online.saw_unity_project(dirpath)
+            except Exception as e:   # an unexpected settings file shouldn't cost the whole report
+                problems.append(f"reading the project's settings: {describe(e, root)}")
         if "Unreal Engine source" in kinds:
             engine_sources.append(os.path.dirname(short_path(dirpath)))
         progress(f"Scanning: {total_files:,} files so far ...")
@@ -6856,13 +8406,16 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                 category = "engine"
             elif uplugin and is_bought_unreal_plugin(os.path.join(dirpath, uplugin)):
                 category, library = "third-party", os.path.basename(dirpath)
+                library_terms[library] = unreal_plugin_terms(os.path.join(dirpath, uplugin))
             elif (not in_unity_assets and os.path.basename(dirpath).lower() in EPIC_UNREAL_PACKAGES
                   and {d.lower() for d in dirnames} & {"classes", "inc", "src"}):
                 category = "engine"
             elif unity == "inside" and store_guids and store_guids.get(meta_guid(short_path(dirpath))):
                 category, library = "third-party", "Asset Store: " + store_guids[meta_guid(short_path(dirpath))]
+                library_terms[library] = "Unity Asset Store"
             elif unity == "inside" and looks_like_asset_store_package(dirpath, filenames, dirnames):
                 category, library = "third-party", os.path.basename(dirpath)
+                library_terms[library] = "Unity Asset Store, by its folders"
             elif rel != "." and any(LICENSE_FILE.match(f) for f in filenames):
                 if not kinds and any(os.path.splitext(f)[1].lower() in CODE_EXTS
                                      for f in list_files(os.path.dirname(dirpath))):
@@ -6876,8 +8429,12 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                 theirs = bool(owner and repo_owner(url) and repo_owner(url) != owner)
                 name = re.sub(r"\.git$", "", url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]) or sub_path
                 full = os.path.normcase(os.path.abspath(os.path.join(short_path(dirpath), sub_path)))
+                unmeasured_paths.add(full)
                 if theirs:
                     submodule_marks[full] = ("third-party", name)
+                    library_terms[name] = "a Git submodule from another owner's repository"
+                elif category in ("own", "test"):
+                    own_frameworks.append((os.path.normpath(os.path.join(rel, sub_path)), "Git submodule"))
                 submodule_list.append((name, theirs))
         mark = submodule_marks.get(os.path.normcase(short_path(dirpath)))
         if mark and category in ("own", "test"):
@@ -6887,6 +8444,14 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
             category, library = hand, (os.path.basename(dirpath) if hand == "third-party" else None)
         here_own = category in ("own", "test")
         rel_slash = rel.replace(os.sep, "/")
+        if uplugin and category != "engine":   # the engine's own plugins aren't the game's
+            online.saw_name(os.path.splitext(uplugin)[0], "plugin in the project")
+            if here_own and rel != ".":
+                own_frameworks.append((rel, "Unreal plugin"))
+        if category == "third-party" and library and library not in library_terms:
+            terms = folder_licence(dirpath, filenames)
+            if terms:
+                library_terms[library] = terms
         if came_own and not here_own:
             not_own_folders.append(rel_slash)
 
@@ -6943,6 +8508,9 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                         or ("Ren'Py" in kinds and dl in RENPY_ROOT_THIRD_PARTY_DIRS)
                         or (in_unreal_content and dl in UNREAL_CONTENT_THIRD_PARTY_DIRS)):
                     child, child_library = "third-party", d      # one package
+                    terms = FOLDER_TERMS.get(dl) or (FOLDER_TERMS["com.unity."] if dl.startswith("com.unity.") else None)
+                    if terms:
+                        library_terms.setdefault(d, terms)
                 elif dl in TEST_DIRS:
                     child = "test"
             elif category == "third-party" and library is None:
@@ -6951,8 +8519,16 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                 child_unity = "assets"
             else:
                 child_unity = "inside" if in_unity_assets else None
-            inherited[full] = (child, child_unity, enclosing, child_library, platform or (d if d in consoles else None))
+            child_rel = (d if rel == "." else f"{rel_slash}/{d}")
+            child_unmeasured = (unmeasured or os.path.normcase(short_path(full)) in unmeasured_paths
+                                or is_ignored(rules, child_rel, True))
+            inherited[full] = (child, child_unity, enclosing, child_library, platform or (d if d in consoles else None),
+                               child_unmeasured)
+            if not child_unmeasured:
+                rules_at[full] = rules
             kept.append(d)
+            if in_unity_packages and child in ("own", "test") and here_own:
+                own_frameworks.append((os.path.join(rel, d) if rel != "." else d, "Unity package"))
             if listed and child in ("own", "test"):
                 not_own_folders.pop()
         dirnames[:] = kept
@@ -6985,6 +8561,10 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                 ext = os.path.splitext(name)[1].lower()
                 rel_file = os.path.join(rel, name) if rel != "." else name
                 deps.saw_file(rel_file)
+                own_file = category not in ("third-party", "engine")   # translations are the studio's too
+                practices.saw_file(own_file, rel_file, path, ext)
+                if own_file and name.lower().endswith("server.target.cs"):
+                    online.server_targets += 1
                 if category in ("own", "test"):
                     if BUILD_FILE.match(name):
                         deps.saw_build_file(path, name)
@@ -7002,10 +8582,21 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                 elif ext in SECRET_SCAN_EXTS and st.st_size < 1_000_000 and category != "third-party":
                     try:
                         with open(path, "rb") as f:
-                            for kind in secrets_in(f.read()):
-                                secrets[kind] += 1
+                            settings = f.read()
+                        for kind in secrets_in(settings):
+                            secrets[kind] += 1
+                        if own_file:
+                            online.hosts |= hosts_in(settings)
+                            practices.links |= document_links(settings)
                     except OSError:
                         pass
+                if ext == ".asset" and in_unity_assets:
+                    game_content.saw_unity_asset(own_file, path)
+                measured_file = not unmeasured and not is_ignored(rules, rel_file.replace(os.sep, "/"), False)
+                read_as_code = (ext in CODE_EXTS or bool(BUILD_SCRIPTS.match(name))
+                                or (ext in CONTEXT_CODE_EXTS and CONTEXT_CODE_EXTS[ext][0] in enclosing))
+                if measured_file and not read_as_code and category in ("own", "test"):
+                    measures.saw_file(path, rel_file, name)   # settings, data, documents: scc counts them too
 
                 # ####################
                 # Unreal packages
@@ -7015,14 +8606,15 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                     if info is None and st.st_size < 1024 and is_lfs_pointer(path):
                         lfs_pointers += 1
                     if ext in (".uasset", ".umap"):
-                        assets[unreal_asset_kind(info, ext, os.path.join(rel, name))] += 1
+                        saw_asset(unreal_asset_kind(info, ext, os.path.join(rel, name)))
                     else:
-                        assets[next(k for k, exts in ASSET_EXTS.items() if ext in exts)] += 1
+                        saw_asset(next(k for k, exts in ASSET_EXTS.items() if ext in exts))
                     if info:
                         c = category
                         if c != "engine" and ext == ".u" and os.path.splitext(name)[0].lower() in EPIC_UNREAL_PACKAGES:
                             c = "engine"
                         g = "own" if c in ("own", "test") else c
+                        game_content.saw_unreal_package(g == "own", info)
                         for row, nodes in graph_rows(info):
                             graphs[g][row][0] += 1
                             graphs[g][row][1] += nodes
@@ -7068,7 +8660,11 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                 if lang is None:
                     asset = next((kind for kind, exts in ASSET_EXTS.items() if ext in exts), None)
                     if asset:
-                        assets[asset] += 1
+                        saw_asset(asset)
+                        if asset == "Prefabs" and in_unity_assets:
+                            game_content.saw_prefab(own_file, path)
+                        elif asset == "3D models" and in_unity_assets:
+                            game_content.saw_unity_model(own_file, path)
                     elif ext and ext not in NOT_CODE_TEXT and category in ("own", "test"):
                         if ext not in textual:   # judged by its first file: no NUL bytes means text
                             try:
@@ -7104,6 +8700,10 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                         lang = "VBA (Access)"
                 for kind in code["secrets"]:
                     secrets[kind] += 1
+                if code["uclasses"]:
+                    game_content.saw_uclasses(category in ("own", "test"), code["uclasses"])
+                if ext == ".cs" and "Unity" in enclosing:
+                    game_content.saw_unity_script(path)
 
                 # ####################
                 # Whose code this file is
@@ -7124,6 +8724,11 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                 elif c == "own" and TEST_FILE.search(name):
                     c = "test"
 
+                # The studio's own, generated or not (scc counts generated code too), in its own folders.
+                if measured_file and read_as_code and c in ("own", "test", "generated", "data") \
+                        and (category in ("own", "test") or hand == "own"):
+                    measures.saw_file(path, rel_file, name, code["bytes"])
+
                 # ####################
                 # Counting it
                 # ####################
@@ -7141,10 +8746,6 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                     not_own_files.append(rel_file.replace(os.sep, "/"))
                 if c in ("own", "test"):
                     source_lines[lang] += lines
-                    if ext in UNRECOGNISED_CODE and lines:
-                        unrecognised.add(ext)
-                    if lang == "C/C++":
-                        c_family[form_language(lang, ext)] += lines
                 if c == "third-party":
                     libraries[library or known or licence or "other"] += lines
                 if c in ("own", "test") and licence == EPIC_NOTICE:
@@ -7161,6 +8762,9 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                 # ####################
                 # What else the studio's own code shows
                 # ####################
+                if c in ("own", "test"):
+                    online.saw_code(code)
+                    practices.saw_code(code)
                 if c in ("own", "test") and lines:
                     own_lines_by_dir[rel] += lines
                     years[datetime.fromtimestamp(st.st_mtime, timezone.utc).year] += 1
@@ -7328,6 +8932,16 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         out += ["", "Folders with their own licence file, counted as original code (check they aren't someone else's;",
                 "if one is, run again with --third-party <folder>):"]
         out += [f"  {rel:<40} {n:>11,} lines" for rel, n in sorted(licensed, key=lambda kv: -kv[1])[:10]]
+    frameworks = []
+    for rel, what in own_frameworks:
+        n = sum(k for d, k in own_lines_by_dir.items() if d == rel or d.startswith(rel + os.sep))
+        frameworks.append((rel.replace(os.sep, "/"), what, n))
+    if frameworks:
+        out += ["", "The studio's own plugins, packages and submodules (often an in-house framework that other games",
+                "share; ask whether it is part of the sale, licensed, or kept):"]
+        out += [f"  {rel:<40} {n:>11,} lines   ({what})" for rel, what, n in sorted(frameworks, key=lambda f: -f[2])[:15]]
+        if len(frameworks) > 15:
+            out.append(f"  ... and {len(frameworks) - 15} more")
 
     # ####################
     # Text files of unknown kinds
@@ -7377,6 +8991,21 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
             out += section()
         except Exception as e:   # a report section shouldn't cost the whole report
             problems.append(f"reporting {what}: {describe(e, root)}")
+    online_summary = online_facts = None
+    try:
+        for lib in list(libraries) + list(assets_by_library):
+            online.saw_name(lib, "a library or pack in the folder")
+        for ecosystem, names in deps.packages.items():
+            for package in names:
+                online.saw_name(package, "a package the project lists")
+        for lib in list(deps.build) + list(deps.missing_includes()):
+            online.saw_name(lib, "an SDK the code includes or builds with")
+        for rel_dir, _ in own_frameworks:
+            online.saw_name(os.path.basename(rel_dir), "the studio's own plugin or package")
+        section, online_summary, online_facts = online.report()
+        out += section
+    except Exception as e:   # a report section shouldn't cost the whole report
+        problems.append(f"reporting the online services: {describe(e, root)}")
     if any(compiled for _, compiled, _ in dbcode.access):
         alerts.append("a compiled Access database (its VBA source is gone)")
     if any(got.get("macros_on") for _, _, got in dbcode.access):
@@ -7422,7 +9051,9 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
                        " their folders only)")
         if cat == "third-party" and libraries:
             out.append("  By library, package or licence (found by Asset Store download, folder, file name or licence):")
-            out += [f"    {lib:<52} {n:>11,} lines" for lib, n in libraries.most_common(12)]
+            out += [f"    {lib:<52} {n:>11,} lines" + (f"   ({library_terms[lib]})" if library_terms.get(lib) else "")
+                    + ("   (switched off in the .uproject: could be left out)" if lib.lower() in online.disabled_plugins
+                       else "") for lib, n in libraries.most_common(12)]
             if len(libraries) > 12:
                 out.append(f"    ... and {len(libraries) - 12} more")
     unknown_deps = deps.unknown_libraries()
@@ -7483,7 +9114,20 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     # Assets
     # ####################
     if assets:
-        out += ["", "Assets:"] + [f"  {k:<34} {v:>8,}" for k, v in assets.most_common()]
+        out += ["", "Assets:", f"  {'':<34} {'all':>8} {'own':>8} {'others':>8}   (others: in plugins, packs and samples)"]
+        out += [f"  {k:<34} {v:>8,} {v - assets_theirs[k]:>8,} {assets_theirs[k]:>8,}" for k, v in assets.most_common()]
+    if assets_by_library:
+        out += ["", "Someone else's assets, by library, pack or plugin (files):"]
+        out += [f"  {lib:<52} {n:>8,}" + (f"   ({library_terms[lib]})" if library_terms.get(lib) else "")
+                for lib, n in assets_by_library.most_common(12)]
+        if len(assets_by_library) > 12:
+            out.append(f"  ... and {len(assets_by_library) - 12} more")
+    content_facts = None
+    try:
+        section, content_facts = game_content.report()
+        out += section
+    except Exception as e:   # a report section shouldn't cost the whole report
+        problems.append(f"reporting the game's content: {describe(e, root)}")
 
     # ####################
     # Version-control history
@@ -7632,6 +9276,15 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         out += section
     except Exception as e:   # a report section shouldn't cost the whole report
         problems.append(f"reporting the test coverage: {describe(e, root)}")
+    practices_summary = practices_facts = None
+    try:
+        functional = ((content_facts or {}).get("unreal") or {}).get("blueprint_classes", {}).get(
+            "Automated tests (functional tests)", 0)
+        office = assets["Documents (design docs, specs ...)"] - assets_theirs["Documents (design docs, specs ...)"]
+        section, practices_summary, practices_facts = practices.report(functional, office)
+        out += section
+    except Exception as e:   # a report section shouldn't cost the whole report
+        problems.append(f"reporting how the studio works: {describe(e, root)}")
 
     # ####################
     # Standard measures
@@ -7640,29 +9293,19 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     try:
         # The apparently original code's lines by language, as forms name them; and the part of
         # them that wasn't read from source files (but from databases), which scc can't see.
-        own_by_lang, own_languages, database_languages = Counter(), Counter(c_family), Counter()
+        own_by_lang, database_languages = Counter(), Counter()
         for c in ("own", "test"):
             for lang, (_, n) in lines_by[c].items():
                 own_by_lang[lang] += n
         for lang, n in own_by_lang.items():
-            if lang != "C/C++":
-                own_languages[form_language(lang)] += n
             if n > source_lines[lang]:
                 database_languages[form_language(lang)] += n - source_lines[lang]
         kept = [os.path.relpath(p, root).replace(os.sep, "/") for p, c in marked.items() if c == "own"]
         left_out = left_out_paths(root, not_own_folders, not_own_files, kept)
-        if only:
-            tools, not_measured, tool_reports = {}, {t: "not run on a single file" for t in TOOL_FIGURES}, {}
-        else:
-            tools, not_measured, tool_reports = tool_measures(root, left_out, unrecognised)
-        not_measured = {tool: scrub(why, root) for tool, why in not_measured.items()}
-        section, standard_facts = standard_measures_report(histories, vcs_found, tools, not_measured, left_out,
-                                                           own_languages, database_languages)
+        tools, tool_reports = measures.figures()
+        section, standard_facts = standard_measures_report(histories, vcs_found, tools, left_out, database_languages)
         out += section
-        if not_measured and not only:
-            alerts.append(" and ".join(TOOL_FIGURES[t].split(" (")[0] for t in not_measured)
-                          + " not included (" + " and ".join(not_measured) + " couldn't be used)")
-        if tool_reports and facts is not None:
+        if KEEP_TOOL_REPORTS and facts is not None:
             facts["tool_reports"] = tool_reports
     except Exception as e:   # a report section shouldn't cost the whole report
         problems.append(f"reporting the standard measures: {describe(e, root)}")
@@ -7671,8 +9314,8 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
     # What --offline left out
     # ####################
     if OFFLINE:
-        out += ["", "Run with --offline: this computer connected to no other one (no downloads, no version-control or",
-                "database servers, no network shares besides the folder scanned)."]
+        out += ["", "Run with --offline: this computer connected to no other one (no version-control or database",
+                "servers, no network shares besides the folder scanned)."]
         if _left_out_offline:
             out.append("Left out because of that:")
             out += [f"  - {what}" for what in _left_out_offline]
@@ -7709,8 +9352,8 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         count = rows[unit]
         unit_word = re.sub(r"s\b", "", unit, count=1) if count == 1 else unit   # "1 commit", "1 submitted changelist"
         summary.append(f"  History ({main['vcs']}): {fmt(count)} {unit_word} by {people:,}"
-                       f" {'person' if people == 1 else 'people'}, {rows['first change']} to {rows['last change']};"
-                       f" {plural(prs, 'pull request')} found")
+                       f" {'person' if people == 1 else 'people'}, {rows['first change']} to {rows['last change']}"
+                       f"{months_between(rows['first change'], rows['last change'])}; {plural(prs, 'pull request')} found")
     else:
         summary.append("  History: none found")
     people_all = contributors_across(histories)
@@ -7725,6 +9368,10 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
         summary.append(f"  History, all systems together: {n:,} changes, {first} to {last} ({how})")
     if coverage_summary:
         summary.append(coverage_summary)
+    if practices_summary:
+        summary.append(practices_summary)
+    if online_summary:
+        summary.append(online_summary)
     if alerts:
         summary.append("  Check: " + "; ".join(alerts))
     out[2:2] = summary + [""]
@@ -7743,6 +9390,11 @@ def size_project(root, third_party=(), own=(), facts=None, sql_servers=(), only=
             "folders": [[k, n] for k, n in folder_breakdown(own_lines_by_dir)] if own_lines_by_dir else [],
             "visual_scripting": {row: {"files": f, "nodes": n} for row, (f, n) in graphs["own"].items()},
             "unreal_coverage": dict(coverage), "unreal_versions": dict(unreal_versions), "assets": dict(assets),
+            "assets_someone_elses": dict(assets_theirs), "assets_by_library": dict(assets_by_library),
+            "third_party_terms": {lib: terms for lib, terms in library_terms.items()
+                                  if lib in libraries or lib in assets_by_library},
+            "own_frameworks": [{"folder": rel, "what": what, "lines": n} for rel, what, n in frameworks],
+            "game_content": content_facts, "online": online_facts, "practices": practices_facts,
             "version_control": vcs_found,
             "histories": [{"vcs": h["vcs"], "rows": dict(h["rows"]), "reviews": dict(h["reviews"]),
                            "notes": h.get("notes", []), "changes_counted_in_another_history": len(h.get("counted_elsewhere", ())),
@@ -7795,13 +9447,13 @@ def dropped_path(text):
     return text.strip("'\"")
 
 
-TOOL_REPORT_NAMES = {"scc": "scc", "jscpd": "jscpd-summary"}   # size_report_<name>_<this>.json
+TOOL_REPORT_NAMES = {"lines": "lines", "duplication": "duplication"}   # size_report_<name>_<this>.json
 
 
 def save_report(report, name, here, facts=None):
     """Saves next to this script or, if that folder is read-only, in the current or home folder. The
-    numbers go in a .json beside it too, for reading by machine, and scc's report and jscpd's
-    totals (facts["tool_reports"], with --reports) beside that."""
+    numbers go in a .json beside it too, for reading by machine, and the lines by language and the
+    duplication totals (facts["tool_reports"], with --reports) beside that."""
     tool_reports = (facts or {}).pop("tool_reports", {})
     for folder in (here, os.getcwd(), os.path.expanduser("~")):
         out_path = os.path.join(folder, f"size_report_{name}.txt")
@@ -7844,8 +9496,8 @@ def scan(root, here, third_party=(), own=(), sql_servers=(), sourcesafe=(), hist
     out_path = save_report(report, name, here, facts)
     print(f"Saved: {out_path}\n" if out_path else "Couldn't save the report: please copy it from above.\n")
     if out_path and KEEP_TOOL_REPORTS:
-        print("Also saved beside it: scc's report and jscpd's totals (_scc.json, _jscpd-summary.json), for attaching\n"
-              "to a form. Both hold counts only.\n")
+        print("Also saved beside it: the lines by language and the duplication totals (_lines.json, _duplication.json),\n"
+              "for attaching to a form. Both hold counts only.\n")
 
 
 def usage():
@@ -7869,7 +9521,7 @@ def main():
     # Options
     # ####################
     here = os.path.dirname(os.path.abspath(__file__))
-    global FETCH_TOOLS, KEEP_TOOL_REPORTS, OFFLINE, TRUST_SERVER_CERTIFICATE, NETWORK_SOURCESAFE
+    global KEEP_TOOL_REPORTS, OFFLINE, TRUST_SERVER_CERTIFICATE, NETWORK_SOURCESAFE
     roots, args = [], sys.argv[1:]
     marks = {"--third-party": [], "--own": [], "--sql-server": [], "--sql-database": [], "--sourcesafe": [],
              "--code-ext": [], "--history": []}
@@ -7878,8 +9530,6 @@ def main():
         if arg in ("-h", "--help"):
             print(f"size_codebase.py {__version__}\n\n{usage()}")
             sys.exit(0)
-        elif arg == "--no-download":
-            FETCH_TOOLS = False
         elif arg == "--offline":
             OFFLINE = True
         elif arg == "--reports":
